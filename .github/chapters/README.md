@@ -37,6 +37,8 @@ The original upstream Docker workflow is independent of this workflow and may re
 
 Generated OpenAPI and SDK files are intentionally excluded from both patches. The build runs `mise //:open-api` on the patched release to regenerate them against that release's API. This avoids applying old generated files over unrelated upstream API changes.
 
+The hosted runner's JDK 21 is used for OpenAPI generation because the stable release requests Java without an entry in its mise lockfile. The remaining build tools are installed from upstream's locked versions.
+
 Patch application first performs `git apply --check --whitespace=error` on a clean checkout. A conflict stops the workflow before source changes, verification, or publishing. There is no fuzzy conflict recovery, automatic conflict resolution, or partial chapter build. Test or build failures also prevent publishing.
 
 For a new incompatible release, maintain the patch against a clean checkout of that release, run the feature checks, replace the appropriate patch, and update `tested_base`. For a new major version, add an explicit profile instead of removing the version guard. Keep this recipe directory when synchronizing fork branches.

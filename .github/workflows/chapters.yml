@@ -42,6 +42,7 @@ jobs:
       NODE_OPTIONS: --max-old-space-size=2048
       MISE_JOBS: '1'
       MISE_TASK_RUN_AUTO_INSTALL: 'false'
+      MISE_DISABLE_TOOLS: java
       npm_config_verify_deps_before_run: 'false'
     steps:
       - name: Check out the build recipe
@@ -103,8 +104,15 @@ jobs:
           persist_github_token: false
           export_path: true
           install_args: >-
-            --locked node pnpm java npm:oazapfts npm:@openapitools/openapi-generator-cli
+            --locked node pnpm npm:oazapfts npm:@openapitools/openapi-generator-cli
             github:webassembly/binaryen github:extism/js-pdk github:jellyfin/jellyfin-ffmpeg
+
+      - name: Use the runner's JDK 21 for OpenAPI generation
+        if: steps.existing.outputs.found != 'true'
+        run: |
+          test -x "$JAVA_HOME_21_X64/bin/java"
+          echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME_21_X64/bin" >> "$GITHUB_PATH"
 
       - name: Test the build recipe
         if: steps.existing.outputs.found != 'true'
