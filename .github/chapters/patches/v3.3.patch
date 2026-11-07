@@ -1183,12 +1183,14 @@ index 000000000..27be749cc
 +{/if}
 diff --git a/web/src/lib/components/asset-viewer/VideoTimeline.spec.ts b/web/src/lib/components/asset-viewer/VideoTimeline.spec.ts
 new file mode 100644
-index 000000000..b8a9e6bd1
+index 000000000..59070b6a7
 --- /dev/null
 +++ b/web/src/lib/components/asset-viewer/VideoTimeline.spec.ts
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,29 @@
 +import { render } from '@testing-library/svelte';
 +import VideoTimeline from '$lib/components/asset-viewer/VideoTimeline.svelte';
++
++vi.mock('./immich-time-range', () => ({}));
 +
 +describe('VideoTimeline', () => {
 +  const chapters = [
