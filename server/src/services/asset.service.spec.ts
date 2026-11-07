@@ -683,6 +683,87 @@ describe(AssetService.name, () => {
     });
   });
 
+  describe('getChapters', () => {
+    const id = 'asset-1';
+    const chapters = [{ startTime: 0, endTime: 5, title: 'Intro' }];
+
+    it('returns chapters for an asset owner', async () => {
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([id]));
+      mocks.asset.getMetadataByKey.mockResolvedValue({
+        key: AssetMetadataKey.VideoChapters,
+        value: { chapters },
+        updatedAt: new Date(),
+      });
+      await expect(sut.getChapters(authStub.admin, id)).resolves.toEqual(chapters);
+      expect(mocks.asset.getMetadataByKey).toHaveBeenCalledWith(id, AssetMetadataKey.VideoChapters);
+    });
+
+    it.each([undefined, { chapters: [] }, { chapters: [{ startTime: 'bad' }] }])(
+      'returns no chapters for absent or malformed chapter metadata: %s',
+      async (value) => {
+        mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([id]));
+        mocks.asset.getMetadataByKey.mockResolvedValue(
+          value
+            ? {
+                key: AssetMetadataKey.VideoChapters,
+                value,
+                updatedAt: new Date(),
+              }
+            : undefined,
+        );
+        await expect(sut.getChapters(authStub.admin, id)).resolves.toEqual([]);
+      },
+    );
+
+    it('allows chapters through a shared link even when EXIF and downloads are disabled', async () => {
+      const auth = {
+        ...authStub.adminSharedLink,
+        sharedLink: {
+          ...authStub.adminSharedLink.sharedLink,
+          showExif: false,
+          allowDownload: false,
+        },
+      };
+      mocks.access.asset.checkSharedLinkAccess.mockResolvedValue(new Set([id]));
+      mocks.asset.getMetadataByKey.mockResolvedValue({
+        key: AssetMetadataKey.VideoChapters,
+        value: { chapters },
+        updatedAt: new Date(),
+      });
+      await expect(sut.getChapters(auth, id)).resolves.toEqual(chapters);
+      expect(mocks.access.asset.checkSharedLinkAccess).toHaveBeenCalledWith(auth.sharedLink.id, new Set([id]));
+      expect(mocks.access.asset.checkOwnerAccess).not.toHaveBeenCalled();
+    });
+
+    it.each([authStub.admin, authStub.adminSharedLink])('rejects unauthorized asset access', async (auth) => {
+      await expect(sut.getChapters(auth, id)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mocks.asset.getMetadataByKey).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('read-only chapters', () => {
+    it('rejects deleting chapter metadata', async () => {
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
+      await expect(sut.deleteMetadataByKey(authStub.admin, 'asset-1', AssetMetadataKey.VideoChapters)).rejects.toThrow(
+        'Embedded video chapters are read-only',
+      );
+      expect(mocks.asset.deleteMetadataByKey).not.toHaveBeenCalled();
+    });
+
+    it('rejects bulk deleting chapter metadata before deleting any items', async () => {
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
+      await expect(
+        sut.deleteBulkMetadata(authStub.admin, {
+          items: [
+            { assetId: 'asset-1', key: 'custom' },
+            { assetId: 'asset-1', key: AssetMetadataKey.VideoChapters },
+          ],
+        }),
+      ).rejects.toThrow('Embedded video chapters are read-only');
+      expect(mocks.asset.deleteBulkMetadata).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getOcr', () => {
     it('should require asset read permission', async () => {
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());

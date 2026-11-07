@@ -407,6 +407,7 @@ export const UserMetadataKeySchema = z
 
 export enum AssetMetadataKey {
   MobileApp = 'mobile-app',
+  VideoChapters = 'video-chapters',
 }
 
 export enum UserAvatarColor {

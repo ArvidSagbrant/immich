@@ -43,6 +43,7 @@ const probeStubDefaultVideoStream: VideoStreamInfo[] = [
 const probeStubDefaultAudioStream: AudioStreamInfo[] = [{ index: 3, codecName: 'mp3', bitrate: 100, profile: null }];
 
 const probeStubDefault: VideoInfo = {
+  chapters: [],
   format: probeStubDefaultFormat,
   videoStreams: probeStubDefaultVideoStream,
   audioStreams: probeStubDefaultAudioStream,

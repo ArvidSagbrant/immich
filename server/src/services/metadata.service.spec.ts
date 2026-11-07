@@ -7,6 +7,7 @@ import { StorageCore, ThumbnailPathEntity } from 'src/cores/storage.core.js';
 import { defaults } from 'src/dtos/config.dto.js';
 import {
   AssetFileType,
+  AssetMetadataKey,
   AssetType,
   AssetVisibility,
   ChecksumAlgorithm,
@@ -172,12 +173,42 @@ describe(MetadataService.name, () => {
     beforeEach(() => {
       const time = new Date('2022-01-01T00:00:00.000Z');
       const timeMs = time.valueOf();
+      mocks.asset.upsertMetadata.mockResolvedValue([]);
       mocks.storage.stat.mockResolvedValue({
         size: 123_456,
         mtime: time,
         mtimeMs: timeMs,
         birthtimeMs: timeMs,
       } as Stats);
+    });
+
+    it('persists embedded chapters and replaces them when chapters are removed', async () => {
+      const asset = AssetFactory.create({ type: AssetType.Video });
+      const chapters = [{ startTime: 1.25, endTime: 3, title: 'Intro' }];
+      mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
+      mocks.asset.upsertMetadata.mockResolvedValue([]);
+      mocks.media.probe.mockResolvedValue({ ...videoInfoStub.videoStreamH264, chapters });
+
+      await sut.handleMetadataExtraction({ id: asset.id });
+
+      expect(mocks.asset.upsertMetadata).toHaveBeenLastCalledWith(asset.id, [
+        { key: AssetMetadataKey.VideoChapters, value: { chapters } },
+      ]);
+
+      mocks.media.probe.mockResolvedValue({ ...videoInfoStub.videoStreamH264, chapters: [] });
+      mockReadTags();
+      await sut.handleMetadataExtraction({ id: asset.id });
+
+      expect(mocks.asset.upsertMetadata).toHaveBeenLastCalledWith(asset.id, [
+        { key: AssetMetadataKey.VideoChapters, value: { chapters: [] } },
+      ]);
+    });
+
+    it('does not store video chapters for images', async () => {
+      const asset = AssetFactory.create({ type: AssetType.Image });
+      mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
+      await sut.handleMetadataExtraction({ id: asset.id });
+      expect(mocks.asset.upsertMetadata).not.toHaveBeenCalled();
     });
 
     it('should handle an asset that could not be found', async () => {

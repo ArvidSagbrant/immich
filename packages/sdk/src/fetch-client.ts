@@ -1379,6 +1379,14 @@ export type UpdateAssetDto = {
     rating?: number | null;
     visibility?: AssetVisibility;
 };
+export type AssetChapterResponseDto = {
+    /** Chapter end time in seconds */
+    endTime: number;
+    /** Chapter start time in seconds */
+    startTime: number;
+    /** Embedded chapter title, if present */
+    title: string | null;
+};
 export type CropParameters = {
     /** Height of the crop */
     height: number;
@@ -4973,6 +4981,24 @@ export function updateAsset({ id, updateAssetDto }: {
         method: "PUT",
         body: updateAssetDto
     })));
+}
+/**
+ * Get embedded video chapters
+ */
+export function getAssetChapters({ id, key, slug }: {
+    id: string;
+    key?: string;
+    slug?: string;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 200;
+        data: AssetChapterResponseDto[];
+    }>(`/assets/${encodeURIComponent(id)}/chapters${QS.query(QS.explode({
+        key,
+        slug
+    }))}`, {
+        ...opts
+    }));
 }
 /**
  * Remove edits from an existing asset

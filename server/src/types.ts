@@ -3,6 +3,7 @@ import { ShallowDehydrateObject } from 'kysely';
 import { Mocked } from 'vitest';
 import { VECTOR_EXTENSIONS } from 'src/constants.js';
 import { AssetFile } from 'src/database.js';
+import { AssetChapterResponseDto } from 'src/dtos/asset-chapters.dto.js';
 import { UploadFieldName } from 'src/dtos/asset-media.dto.js';
 import { AuthDto } from 'src/dtos/auth.dto.js';
 import { SystemConfig } from 'src/dtos/config.dto.js';
@@ -143,6 +144,7 @@ export interface VideoInfo {
   format: VideoFormat;
   videoStreams: VideoStreamInfo[];
   audioStreams: AudioStreamInfo[];
+  chapters: AssetChapterResponseDto[];
 }
 
 export interface TranscodeCommand {

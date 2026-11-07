@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, Put, Query } from '@nestjs/common';
 import { ApiExcludeEndpoint, ApiTags } from '@nestjs/swagger';
 import { Endpoint, HistoryBuilder } from 'src/decorators.js';
+import { AssetChapterResponseDto } from 'src/dtos/asset-chapters.dto.js';
 import { AssetResponseDto } from 'src/dtos/asset-response.dto.js';
 import {
   AssetBulkDeleteDto,
@@ -169,6 +170,18 @@ export class AssetController {
   })
   getAssetMetadata(@Auth() auth: AuthDto, @Param() { id }: UUIDParamDto): Promise<AssetMetadataResponseDto[]> {
     return this.service.getMetadata(auth, id);
+  }
+
+  @Get(':id/chapters')
+  @Authenticated({ permission: Permission.AssetRead, sharedLink: true })
+  @Endpoint({
+    summary: 'Get embedded video chapters',
+    description:
+      'Retrieve read-only chapter titles and times extracted from the original video. Returns an empty list when no chapters are available.',
+    history: new HistoryBuilder().added('v3').beta('v3'),
+  })
+  getAssetChapters(@Auth() auth: AuthDto, @Param() { id }: UUIDParamDto): Promise<AssetChapterResponseDto[]> {
+    return this.service.getChapters(auth, id);
   }
 
   @Get(':id/ocr')

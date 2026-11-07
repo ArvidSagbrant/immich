@@ -37,6 +37,7 @@ import type {
   VideoInfo,
   VideoPacketInfo,
 } from 'src/types.js';
+import { extractChapters } from 'src/utils/chapters.js';
 import { handlePromiseError } from 'src/utils/misc.js';
 import { createAffineMatrix } from 'src/utils/transform.js';
 
@@ -254,8 +255,9 @@ export class MediaRepository {
   }
 
   async probe(input: string, options?: ProbeOptions): Promise<VideoInfo> {
-    const results = await probe(input, options?.countFrames ? ['-count_packets'] : []); // gets frame count quickly: https://stackoverflow.com/a/28376817
+    const results = await probe(input, ['-show_chapters', ...(options?.countFrames ? ['-count_packets'] : [])]);
     return {
+      chapters: extractChapters(results.chapters, this.parseFloat(results.format.duration)),
       format: {
         formatName: results.format.format_name,
         formatLongName: results.format.format_long_name,

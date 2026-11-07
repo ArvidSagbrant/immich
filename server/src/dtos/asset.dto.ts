@@ -2,7 +2,7 @@ import { createZodDto } from 'nestjs-zod';
 import z from 'zod';
 import { HistoryBuilder } from 'src/decorators.js';
 import { BulkIdsSchema } from 'src/dtos/asset-ids.response.dto.js';
-import { AssetType, AssetVisibilitySchema } from 'src/enum.js';
+import { AssetMetadataKey, AssetType, AssetVisibilitySchema } from 'src/enum.js';
 import { AssetStats } from 'src/repositories/asset.repository.js';
 import { IsNotSiblingOf, isoDatetimeToDate, latitudeSchema, longitudeSchema, stringToBool } from 'src/validation.js';
 
@@ -99,9 +99,14 @@ const AssetMetadataRouteParamsSchema = z
   })
   .meta({ id: 'AssetMetadataRouteParams' });
 
+const WritableMetadataKeySchema = z
+  .string()
+  .refine((key) => key !== AssetMetadataKey.VideoChapters, 'Embedded video chapters are read-only')
+  .describe('Metadata key');
+
 export const AssetMetadataUpsertItemSchema = z
   .object({
-    key: z.string().describe('Metadata key'),
+    key: WritableMetadataKeySchema,
     value: z.record(z.string(), z.unknown()).describe('Metadata value (object)'),
   })
   .meta({ id: 'AssetMetadataUpsertItemDto' });
@@ -115,7 +120,7 @@ const AssetMetadataUpsertSchema = z
 const AssetMetadataBulkUpsertItemSchema = z
   .object({
     assetId: z.uuidv4().describe('Asset ID'),
-    key: z.string().describe('Metadata key'),
+    key: WritableMetadataKeySchema,
     value: z.record(z.string(), z.unknown()).describe('Metadata value (object)'),
   })
   .meta({ id: 'AssetMetadataBulkUpsertItemDto' });

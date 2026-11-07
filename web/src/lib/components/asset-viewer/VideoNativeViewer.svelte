@@ -1,11 +1,14 @@
 <script lang="ts">
+  import VideoChapterMenu from '#lib/components/asset-viewer/VideoChapterMenu.svelte';
   import VideoRemoteViewer from '#lib/components/asset-viewer/VideoRemoteViewer.svelte';
+  import VideoTimeline from '#lib/components/asset-viewer/VideoTimeline.svelte';
   import FaceEditor from '#lib/components/asset-viewer/face-editor/FaceEditor.svelte';
   import { assetViewerFadeDuration } from '#lib/constants.ts';
   import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
   import { authManager } from '#lib/managers/auth-manager.svelte.ts';
   import { castManager } from '#lib/managers/cast-manager.svelte.ts';
   import { mediaCapabilitiesManager } from '#lib/managers/media-capabilities-manager.svelte.ts';
+  import { getAssetChaptersQuery } from '#lib/queries/asset.query.ts';
   import { createPreloadedQuery } from '#lib/queries/client.ts';
   import { getPublicConfigQuery } from '#lib/queries/config-public.query.ts';
   import { autoPlayVideo, lang, loopVideo as loopVideoPreference } from '#lib/stores/preferences.store.ts';
@@ -25,6 +28,7 @@
     mdiVolumeMedium,
     mdiVolumeMute,
   } from '@mdi/js';
+  import { createQuery } from '@tanstack/svelte-query';
   import 'hls-video-element';
   import type HlsVideoElement from 'hls-video-element';
   import Hls, { AbrController, Events, type FragLoadedData, type FragLoadingData, type HlsConfig } from 'hls.js';
@@ -45,7 +49,6 @@
   import { useSwipe, type SwipeCustomEvent } from 'svelte-gestures';
   import { t } from 'svelte-i18n';
   import { fade } from 'svelte/transition';
-  import './immich-time-range';
 
   const query = createPreloadedQuery(getPublicConfigQuery);
   const publicConfig = $derived(query.data);
@@ -79,6 +82,20 @@
   }: Props = $props();
 
   let videoPlayer: HTMLVideoElement | undefined = $state();
+  const chaptersQuery = createQuery(() => getAssetChaptersQuery(assetId, cacheKey));
+  const chapters = $derived(chaptersQuery.data ?? []);
+  let currentTime = $state(0);
+  let duration = $state(0);
+
+  const onTimeUpdate = () => {
+    currentTime = videoPlayer?.currentTime ?? 0;
+  };
+
+  const onLoadedMetadata = () => {
+    hasLoadedMetadata = true;
+    duration = videoPlayer?.duration ?? 0;
+    onTimeUpdate();
+  };
   let isLoading = $state(true);
   let hasLoadedMetadata = $state(false);
   let assetFileUrl = $derived.by(() => {
@@ -247,6 +264,8 @@
   $effect(() => {
     // reactive on `assetFileUrl` changes
     hasLoadedMetadata = false;
+    currentTime = 0;
+    duration = 0;
     if (videoPlayer && assetFileUrl) {
       hasFocused = false;
       rebuildCount = 0;
@@ -391,7 +410,9 @@
             {...useSwipe(onSwipe)}
             class="h-full object-contain"
             oncanplay={(e: Event) => handleCanPlay(e.currentTarget as HTMLVideoElement)}
-            onloadedmetadata={() => (hasLoadedMetadata = true)}
+            onloadedmetadata={onLoadedMetadata}
+            ontimeupdate={onTimeUpdate}
+            ondurationchange={() => (duration = videoPlayer?.duration ?? 0)}
             onended={onVideoEnded}
             onseeking={onSeeking}
             onplaying={(e: Event) => {
@@ -417,7 +438,9 @@
             {...useSwipe(onSwipe)}
             class="h-full object-contain"
             oncanplay={(e) => handleCanPlay(e.currentTarget)}
-            onloadedmetadata={() => (hasLoadedMetadata = true)}
+            onloadedmetadata={onLoadedMetadata}
+            ontimeupdate={onTimeUpdate}
+            ondurationchange={() => (duration = videoPlayer?.duration ?? 0)}
             onended={onVideoEnded}
             onseeking={onSeeking}
             onplaying={(e) => {
@@ -470,6 +493,8 @@
 
             <span class="grow"></span>
 
+            <VideoChapterMenu {chapters} player={videoPlayer} ready={hasLoadedMetadata} {currentTime} />
+
             <div
               class="volume-wrapper shrink-0 rounded-full bg-light-100/0 transition-colors duration-400 hover:bg-light-100"
             >
@@ -490,7 +515,7 @@
               <media-settings-menu-button class="shrink-0 rounded-full p-2 outline-none"></media-settings-menu-button>
             {/if}
           </media-control-bar>
-          <immich-time-range class="h-8 w-full rounded-lg px-2 pb-3 outline-none"></immich-time-range>
+          <VideoTimeline {chapters} {duration} />
         </div>
       </media-controller>
 
@@ -548,12 +573,12 @@
     font-variant-numeric: tabular-nums;
   }
 
-  immich-time-range,
+  :global(immich-time-range),
   media-volume-range {
     --media-control-hover-background: none;
   }
 
-  immich-time-range:hover,
+  :global(immich-time-range:hover),
   media-volume-range:hover {
     --media-range-thumb-opacity: 1;
   }

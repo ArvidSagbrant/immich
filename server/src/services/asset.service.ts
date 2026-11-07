@@ -3,6 +3,7 @@ import { isUndefined, omitBy } from 'lodash-es';
 import { DateTime, Duration } from 'luxon';
 import type { AssetFile } from 'src/database.js';
 import { OnJob } from 'src/decorators.js';
+import { AssetChapterResponseDto, AssetChapterSchema } from 'src/dtos/asset-chapters.dto.js';
 import { AssetResponseDto, SanitizedAssetResponseDto, mapAsset } from 'src/dtos/asset-response.dto.js';
 import {
   AssetBulkDeleteDto,
@@ -29,6 +30,7 @@ import {
 import { AssetOcrResponseDto } from 'src/dtos/ocr.dto.js';
 import {
   AssetFileType,
+  AssetMetadataKey,
   AssetStatus,
   AssetType,
   AssetVisibility,
@@ -390,6 +392,13 @@ export class AssetService extends BaseService {
     return this.assetRepository.getMetadata(id);
   }
 
+  async getChapters(auth: AuthDto, id: string): Promise<AssetChapterResponseDto[]> {
+    await this.requireAccess({ auth, permission: Permission.AssetRead, ids: [id] });
+    const metadata = await this.assetRepository.getMetadataByKey(id, AssetMetadataKey.VideoChapters);
+    const result = AssetChapterSchema.array().safeParse(metadata?.value.chapters ?? []);
+    return result.success ? result.data : [];
+  }
+
   async getOcr(auth: AuthDto, id: string): Promise<AssetOcrResponseDto[]> {
     await this.requireAccess({ auth, permission: Permission.AssetRead, ids: [id] });
     const ocr = await this.ocrRepository.getByAssetId(id);
@@ -413,6 +422,7 @@ export class AssetService extends BaseService {
 
     const uniqueKeys = new Set<string>();
     for (const item of dto.items) {
+      this.requireWritableMetadata(item.key);
       const key = `(${item.assetId}, ${item.key})`;
       if (uniqueKeys.has(key)) {
         throw new BadRequestException(`Duplicate items are not allowed: "${key}"`);
@@ -429,6 +439,7 @@ export class AssetService extends BaseService {
 
     const uniqueKeys = new Set<string>();
     for (const { key } of dto.items) {
+      this.requireWritableMetadata(key);
       if (uniqueKeys.has(key)) {
         throw new BadRequestException(`Duplicate items are not allowed: "${key}"`);
       }
@@ -451,12 +462,22 @@ export class AssetService extends BaseService {
 
   async deleteMetadataByKey(auth: AuthDto, id: string, key: string): Promise<void> {
     await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: [id] });
+    this.requireWritableMetadata(key);
     return this.assetRepository.deleteMetadataByKey(id, key);
   }
 
   async deleteBulkMetadata(auth: AuthDto, dto: AssetMetadataBulkDeleteDto) {
     await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: dto.items.map((item) => item.assetId) });
+    for (const { key } of dto.items) {
+      this.requireWritableMetadata(key);
+    }
     await this.assetRepository.deleteBulkMetadata(dto.items);
+  }
+
+  private requireWritableMetadata(key: string) {
+    if (key === AssetMetadataKey.VideoChapters) {
+      throw new BadRequestException('Embedded video chapters are read-only');
+    }
   }
 
   async run(auth: AuthDto, dto: AssetJobsDto) {

@@ -4426,6 +4426,82 @@
         "x-immich-state": "Stable"
       }
     },
+    "/assets/{id}/chapters": {
+      "get": {
+        "description": "Retrieve read-only chapter titles and times extracted from the original video. Returns an empty list when no chapters are available.",
+        "operationId": "getAssetChapters",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "slug",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AssetChapterResponseDto"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "cookie": []
+          },
+          {
+            "api_key": []
+          }
+        ],
+        "summary": "Get embedded video chapters",
+        "tags": [
+          "Assets"
+        ],
+        "x-immich-history": [
+          {
+            "version": "v3",
+            "state": "Added"
+          },
+          {
+            "version": "v3",
+            "state": "Beta"
+          }
+        ],
+        "x-immich-permission": "asset.read",
+        "x-immich-state": "Beta"
+      }
+    },
     "/assets/{id}/edits": {
       "delete": {
         "description": "Removes all edit actions (crop, rotate, mirror) associated with the specified asset.",
@@ -20749,6 +20825,34 @@
         "required": [
           "action",
           "id"
+        ],
+        "type": "object"
+      },
+      "AssetChapterResponseDto": {
+        "properties": {
+          "endTime": {
+            "description": "Chapter end time in seconds",
+            "exclusiveMinimum": true,
+            "format": "double",
+            "minimum": 0,
+            "type": "number"
+          },
+          "startTime": {
+            "description": "Chapter start time in seconds",
+            "format": "double",
+            "minimum": 0,
+            "type": "number"
+          },
+          "title": {
+            "description": "Embedded chapter title, if present",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "endTime",
+          "startTime",
+          "title"
         ],
         "type": "object"
       },

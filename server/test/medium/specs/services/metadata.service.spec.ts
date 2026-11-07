@@ -1,13 +1,16 @@
 import { Kysely } from 'kysely';
 import { Stats } from 'node:fs';
-import { mkdtempDisposable, writeFile } from 'node:fs/promises';
+import { mkdtempDisposable, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { AssetMetadataKey, AssetType } from 'src/enum.js';
 import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { EventRepository } from 'src/repositories/event.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
+import { MediaRepository } from 'src/repositories/media.repository.js';
 import { MetadataRepository } from 'src/repositories/metadata.repository.js';
 import { StorageRepository } from 'src/repositories/storage.repository.js';
 import { SystemMetadataRepository } from 'src/repositories/system-metadata.repository.js';
@@ -31,7 +34,7 @@ type TimeZoneTest = {
 let defaultDatabase: Kysely<DB>;
 
 // eslint-disable-next-line unicorn/no-unnecessary-parameters
-const setup = (db?: Kysely<DB>, { realStorage = false } = {}) => {
+const setup = (db?: Kysely<DB>, { realStorage = false, realMedia = false } = {}) => {
   const { sut, ctx } = newMediumService(MetadataService, {
     database: db || defaultDatabase,
     real: [
@@ -41,6 +44,7 @@ const setup = (db?: Kysely<DB>, { realStorage = false } = {}) => {
       MetadataRepository,
       SystemMetadataRepository,
       TagRepository,
+      ...(realMedia ? [MediaRepository] : []),
       ...(realStorage ? [StorageRepository] : []),
     ],
     mock: [EventRepository, LoggingRepository, ...(realStorage ? [] : [StorageRepository])],
@@ -79,6 +83,38 @@ describe(MetadataService.name, () => {
   it('should be defined', () => {
     const { sut } = setup();
     expect(sut).toBeDefined();
+  });
+
+  it('extracts and replaces persisted video chapters without changing the original file', async () => {
+    const { sut, ctx } = setup(undefined, { realStorage: true, realMedia: true });
+    const originalPath = fileURLToPath(new URL('../../../fixtures/chapters/chapters.mp4', import.meta.url));
+    const contents = await readFile(originalPath);
+    const { user } = await ctx.newUser();
+    const { asset } = await ctx.newAsset({ ownerId: user.id, type: AssetType.Video, originalPath });
+    ctx.getMock(EventRepository).emit.mockResolvedValue();
+
+    await sut.handleMetadataExtraction({ id: asset.id });
+
+    const repository = ctx.get(AssetRepository);
+    await expect(repository.getMetadataByKey(asset.id, AssetMetadataKey.VideoChapters)).resolves.toMatchObject({
+      value: {
+        chapters: [
+          { startTime: 0, endTime: 1, title: 'Intro' },
+          { startTime: 1, endTime: 2, title: 'Snow = 雪' },
+          { startTime: 2, endTime: 3, title: null },
+        ],
+      },
+    });
+    await expect(readFile(originalPath)).resolves.toEqual(contents);
+
+    await repository.update({
+      id: asset.id,
+      originalPath: fileURLToPath(new URL('../../../fixtures/chapters/no-chapters.mp4', import.meta.url)),
+    });
+    await sut.handleMetadataExtraction({ id: asset.id });
+    await expect(repository.getMetadataByKey(asset.id, AssetMetadataKey.VideoChapters)).resolves.toMatchObject({
+      value: { chapters: [] },
+    });
   });
 
   describe('sidecar metadata extraction', () => {

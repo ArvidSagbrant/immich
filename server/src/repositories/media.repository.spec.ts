@@ -1,6 +1,7 @@
 import { mkdtempDisposableSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 import { AssetEditAction, MirrorAxis } from 'src/dtos/editing.dto.js';
 import { Colorspace, ImageFormat } from 'src/enum.js';
@@ -66,6 +67,27 @@ describe(MediaRepository.name, () => {
   beforeEach(() => {
     // eslint-disable-next-line no-sparse-arrays
     sut = new MediaRepository(automock(LoggingRepository, { args: [, { getEnv: () => ({}) }], strict: false }));
+  });
+
+  describe('embedded chapters', () => {
+    const fixtures = fileURLToPath(new URL('../../test/fixtures/chapters/', import.meta.url));
+
+    it.each(['chapters.mp4', 'quicktime.mov', 'nero.mp4', 'chapters.mkv'])(
+      'extracts chapter times and titles from %s',
+      async (filename) => {
+        const result = await sut.probe(join(fixtures, filename));
+        expect(result.chapters).toEqual([
+          { startTime: 0, endTime: 1, title: 'Intro' },
+          { startTime: 1, endTime: 2, title: 'Snow = 雪' },
+          { startTime: 2, endTime: 3, title: null },
+        ]);
+      },
+    );
+
+    it('returns no chapters for a video without chapters', async () => {
+      const result = await sut.probe(join(fixtures, 'no-chapters.mp4'));
+      expect(result.chapters).toEqual([]);
+    });
   });
 
   describe('edit (single actions)', () => {

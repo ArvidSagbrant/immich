@@ -1,7 +1,8 @@
 import request from 'supertest';
 import { AssetController } from 'src/controllers/asset.controller.js';
-import { AssetMetadataKey } from 'src/enum.js';
+import { AssetMetadataKey, Permission } from 'src/enum.js';
 import { AssetService } from 'src/services/asset.service.js';
+import { authStub } from 'test/fixtures/auth.stub.js';
 import { factory } from 'test/small.factory.js';
 import { ControllerContext, controllerSetup, mockBaseService } from 'test/utils.js';
 
@@ -69,6 +70,43 @@ describe(AssetController.name, () => {
       const { status, body } = await request(ctx.getHttpServer()).get(`/assets/123`);
       expect(status).toBe(400);
       expect(body).toEqual(factory.responses.validationError([{ path: ['id'], message: 'Invalid UUID' }]));
+    });
+  });
+
+  describe('GET /assets/:id/chapters', () => {
+    it('validates the asset id', async () => {
+      const { status } = await request(ctx.getHttpServer()).get('/assets/invalid/chapters');
+      expect(status).toBe(400);
+      expect(service.getChapters).not.toHaveBeenCalled();
+    });
+
+    it('allows shared-link authentication and returns only chapter data', async () => {
+      const id = factory.uuid();
+      const chapters = [{ startTime: 0, endTime: 5, title: 'Intro' }];
+      ctx.authenticate.mockResolvedValue(authStub.adminSharedLink);
+      service.getChapters.mockResolvedValue(chapters);
+      const { status, body } = await request(ctx.getHttpServer()).get(`/assets/${id}/chapters?key=secret`);
+      expect(status).toBe(200);
+      expect(body).toEqual(chapters);
+      expect(service.getChapters).toHaveBeenCalledWith(authStub.adminSharedLink, id);
+      expect(ctx.authenticate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          queryParams: { key: 'secret' },
+          metadata: expect.objectContaining({ permission: Permission.AssetRead, sharedLinkRoute: true }),
+        }),
+      );
+    });
+  });
+
+  describe('read-only chapter metadata', () => {
+    it.each(['/assets/metadata', '/assets/:id/metadata'])('rejects writes through %s', async (route) => {
+      const id = factory.uuid();
+      const { status } = await request(ctx.getHttpServer())
+        .put(route.replace(':id', () => id))
+        .send({ items: [{ assetId: id, key: AssetMetadataKey.VideoChapters, value: { chapters: [] } }] });
+      expect(status).toBe(400);
+      expect(service.upsertMetadata).not.toHaveBeenCalled();
+      expect(service.upsertBulkMetadata).not.toHaveBeenCalled();
     });
   });
 

@@ -11,6 +11,7 @@ import { Asset, AssetFile } from 'src/database.js';
 import { OnEvent, OnJob } from 'src/decorators.js';
 import {
   AssetFileType,
+  AssetMetadataKey,
   AssetType,
   AssetVisibility,
   ChecksumAlgorithm,
@@ -240,7 +241,7 @@ export class MetadataService extends BaseService {
       this.getExifTags(asset),
       this.storageRepository.stat(asset.originalPath),
     ]);
-    const { tags: exifTags, audio, video, packets, format } = exifResult;
+    const { tags: exifTags, audio, video, packets, format, chapters } = exifResult;
     this.logger.verbose('Exif Tags', exifTags);
 
     const dates = this.getDates(asset, exifTags, stats);
@@ -368,6 +369,12 @@ export class MetadataService extends BaseService {
     const assetHeight = validate(isSidewards ? width : height);
 
     const tasks = new Tasks();
+
+    if (asset.type === AssetType.Video) {
+      tasks.push(() =>
+        this.assetRepository.upsertMetadata(asset.id, [{ key: AssetMetadataKey.VideoChapters, value: { chapters } }]),
+      );
+    }
 
     tasks.push(
       () =>
@@ -625,6 +632,7 @@ export class MetadataService extends BaseService {
       video: videoResult?.video,
       packets: videoResult?.packets,
       format: videoResult?.format ?? null,
+      chapters: videoResult?.chapters ?? [],
     };
   }
 
@@ -1119,7 +1127,7 @@ export class MetadataService extends BaseService {
   }
 
   private async getVideoTags(originalPath: string) {
-    const { videoStreams, audioStreams, format } = await this.mediaRepository.probe(originalPath);
+    const { videoStreams, audioStreams, format, chapters } = await this.mediaRepository.probe(originalPath);
     const video = videoStreams[0];
     const audio = audioStreams[0];
     const packets = video?.timeBase ? await this.mediaRepository.probePackets(originalPath, video.index) : null;
@@ -1158,7 +1166,7 @@ export class MetadataService extends BaseService {
       tags.Duration = format.duration;
     }
 
-    return { tags, audio, video, packets, format };
+    return { tags, audio, video, packets, format, chapters };
   }
 
   private getHeifOrientation(exifTags: ImmichTags): ExifOrientation | null {

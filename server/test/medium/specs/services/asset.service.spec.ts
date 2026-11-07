@@ -46,6 +46,39 @@ beforeAll(async () => {
 });
 
 describe(AssetService.name, () => {
+  describe('getChapters', () => {
+    it.each([SharedLinkType.Individual, SharedLinkType.Album])(
+      'limits %s shared-link chapter access to its assets',
+      async (type) => {
+        const { sut, ctx } = setup();
+        const { user } = await ctx.newUser();
+        const { user: otherUser } = await ctx.newUser();
+        const { asset } = await ctx.newAsset({ ownerId: user.id });
+        const { asset: unshared } = await ctx.newAsset({ ownerId: user.id });
+        const chapters = [{ startTime: 0, endTime: 5, title: 'Intro' }];
+        await ctx.newMetadata({ assetId: asset.id, key: AssetMetadataKey.VideoChapters, value: { chapters } });
+        await ctx.newMetadata({ assetId: unshared.id, key: AssetMetadataKey.VideoChapters, value: { chapters } });
+        const { album } = await ctx.newAlbum({ ownerId: user.id }, [asset.id]);
+        const sharedLink = await ctx.get(SharedLinkRepository).create({
+          userId: user.id,
+          key: Buffer.from(factory.uuid()),
+          type,
+          allowUpload: false,
+          allowDownload: false,
+          showExif: false,
+          ...(type === SharedLinkType.Album ? { albumId: album.id } : { assetIds: [asset.id] }),
+        });
+        const auth = factory.auth({ user: { id: user.id }, sharedLink });
+        await expect(sut.getChapters(auth, asset.id)).resolves.toEqual(chapters);
+        await expect(sut.getChapters(auth, unshared.id)).rejects.toThrow('Not found or no asset.read access');
+        await expect(sut.getChapters(factory.auth({ user: otherUser }), asset.id)).rejects.toThrow(
+          'Not found or no asset.read access',
+        );
+        await expect(sut.getChapters(factory.auth({ user }), asset.id)).resolves.toEqual(chapters);
+      },
+    );
+  });
+
   describe('get', () => {
     it('should not return an asset of another user', async () => {
       const { sut, ctx } = setup();

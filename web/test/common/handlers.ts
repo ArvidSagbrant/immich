@@ -74,6 +74,7 @@ export const createHandlers = (data: MockData): Handlers => {
     },
     restoreAssets: ({ body }) => ({ json: { count: data.restoreAssets(body.ids) } }),
     getAssetOcr: ({ params }) => ({ json: data.getOcr(params.id) }),
+    getAssetChapters: () => ({ json: [] }),
     checkBulkUpload: ({ body }) => ({
       json: { results: body.assets.map(({ id }) => ({ id, action: AssetUploadAction.Accept })) },
     }),
