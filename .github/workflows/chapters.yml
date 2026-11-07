@@ -1,0 +1,181 @@
+name: Stable video chapters image
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Stable upstream release, for example v3.3.6, or latest
+        default: latest
+        required: true
+        type: string
+      publish:
+        description: Publish the tested image to GHCR
+        default: true
+        type: boolean
+      force:
+        description: Rebuild even if this exact release and recipe were published
+        default: false
+        type: boolean
+  schedule:
+    - cron: '23 4 * * *'
+  push:
+    branches: [main]
+    paths:
+      - '.github/chapters/**'
+      - '.github/workflows/chapters.yml'
+
+permissions: {}
+
+concurrency:
+  group: stable-chapters-image
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: ${{ github.repository == 'ArvidSagbrant/immich' && (github.event_name != 'schedule' || vars.CHAPTERS_AUTO_BUILD == 'true') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    env:
+      NODE_OPTIONS: --max-old-space-size=2048
+      MISE_JOBS: '1'
+      MISE_TASK_RUN_AUTO_INSTALL: 'false'
+      npm_config_verify_deps_before_run: 'false'
+    steps:
+      - name: Check out the build recipe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: automation
+          persist-credentials: false
+          sparse-checkout: |
+            .github/chapters
+            .github/workflows/chapters.yml
+            mise.toml
+
+      - name: Resolve stable release and immutable image tag
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_RELEASE: ${{ inputs.release || 'latest' }}
+        run: python3 automation/.github/chapters/ci.py resolve
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check whether this exact image is already available
+        id: existing
+        env:
+          IMAGE_REF: ${{ steps.plan.outputs.image_ref }}
+          FORCE_BUILD: ${{ inputs.force }}
+        run: |
+          if [ "$FORCE_BUILD" != true ] && docker manifest inspect "$IMAGE_REF" > /dev/null 2>&1; then
+            echo 'found=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'found=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the exact upstream commit
+        if: steps.existing.outputs.found != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: immich-app/immich
+          ref: ${{ steps.plan.outputs.upstream_sha }}
+          path: source
+          persist-credentials: false
+
+      - name: Apply the chapter patch without conflict recovery
+        if: steps.existing.outputs.found != 'true'
+        run: python3 automation/.github/chapters/ci.py apply source
+
+      - name: Install the upstream tool versions
+        if: steps.existing.outputs.found != 'true'
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca
+        with:
+          version: 2026.11.3
+          working_directory: source
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          persist_github_token: false
+          export_path: true
+          install_args: >-
+            --locked node pnpm java npm:oazapfts npm:@openapitools/openapi-generator-cli
+            github:webassembly/binaryen github:extism/js-pdk github:jellyfin/jellyfin-ffmpeg
+
+      - name: Test the build recipe
+        if: steps.existing.outputs.found != 'true'
+        run: mise -C automation/.github/chapters run -j 1 test
+
+      - name: Regenerate API clients and verify the feature
+        if: steps.existing.outputs.found != 'true'
+        run: python3 automation/.github/chapters/ci.py verify source
+
+      - name: Set up a builder with limited parallelism and memory
+        if: steps.existing.outputs.found != 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          driver-opts: |
+            memory=4g
+            memory-swap=6g
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 1
+
+      - name: Build the server image including the web client
+        id: image
+        if: steps.existing.outputs.found != 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: source
+          file: source/server/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+          tags: |
+            ${{ steps.plan.outputs.image_ref }}
+            ${{ steps.plan.outputs.release_ref }}
+          build-args: |
+            BUILD_ID=${{ github.run_id }}
+            BUILD_IMAGE=${{ steps.plan.outputs.image_ref }}
+            BUILD_SOURCE_REF=${{ steps.plan.outputs.release }}
+            BUILD_SOURCE_COMMIT=${{ steps.plan.outputs.upstream_sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.plan.outputs.upstream_sha }}
+            io.immich.chapters.patch=${{ steps.plan.outputs.patch_sha }}
+            io.immich.chapters.recipe=${{ steps.plan.outputs.recipe_sha }}
+          cache-from: type=gha,scope=immich-chapters-amd64
+          cache-to: type=gha,mode=max,scope=immich-chapters-amd64
+
+      - name: Record the resulting image
+        if: success()
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          ALREADY_BUILT: ${{ steps.existing.outputs.found }}
+          PUBLISH: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          path = Path('chapters-build.json')
+          plan = json.loads(path.read_text())
+          plan['digest'] = os.environ['IMAGE_DIGEST']
+          plan['published'] = os.environ['PUBLISH'] == 'true' or os.environ['ALREADY_BUILT'] == 'true'
+          path.write_text(json.dumps(plan, indent=2) + '\n')
+          status = 'Published image' if plan['published'] else 'Build only; no image was published'
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f"{status}\n\n`{plan['image_ref']}`\n\nUpstream: `{plan['release']}` (`{plan['upstream_sha']}`)\n")
+          PY
+
+      - name: Save build provenance
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: chapters-build-provenance
+          path: chapters-build.json
+          if-no-files-found: ignore
+          retention-days: 30

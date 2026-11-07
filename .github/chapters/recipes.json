@@ -1,0 +1,22 @@
+{
+  "image": "immich-server-chapters",
+  "profiles": [
+    {
+      "browser_tests": false,
+      "maximum": [3, 4, 0],
+      "minimum": [3, 3, 0],
+      "name": "v3.3",
+      "patch": "patches/v3.3.patch",
+      "tested_base": "587f549f46f1cd1822a06e16dcccecef04ea4565"
+    },
+    {
+      "browser_tests": true,
+      "maximum": [4, 0, 0],
+      "minimum": [3, 4, 0],
+      "name": "v3.4",
+      "patch": "patches/v3.4.patch",
+      "tested_base": "92b529bd88636c2dbc80da7068f124b417a5298c"
+    }
+  ],
+  "upstream": "immich-app/immich"
+}

@@ -1,0 +1,6 @@
+[tasks.test]
+run = "python3 -m unittest discover -s . -p 'test_*.py'"
+
+[tasks.lint]
+dir = "../.."
+run = "actionlint -shellcheck= .github/workflows/chapters.yml"

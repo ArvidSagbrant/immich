@@ -1,0 +1,1478 @@
+diff --git a/i18n/en.json b/i18n/en.json
+index 1a597c14c..8c5a3d904 100644
+--- a/i18n/en.json
++++ b/i18n/en.json
+@@ -2361,6 +2361,8 @@
+   "version_history": "Version History",
+   "version_history_item": "Installed {version} on {date}",
+   "video": "Video",
++  "video_chapter": "Chapter {number}",
++  "video_chapters": "Chapters",
+   "video_hover_setting": "Play video thumbnail on hover",
+   "video_hover_setting_description": "Play video thumbnail when mouse is hovering over item. Even when disabled, playback can be started by hovering over the play icon.",
+   "video_quality": "Video quality",
+diff --git a/server/src/controllers/asset.controller.spec.ts b/server/src/controllers/asset.controller.spec.ts
+index c6160f8f5..41b0227d4 100644
+--- a/server/src/controllers/asset.controller.spec.ts
++++ b/server/src/controllers/asset.controller.spec.ts
+@@ -1,7 +1,8 @@
+ import request from 'supertest';
+ import { AssetController } from 'src/controllers/asset.controller.js';
+-import { AssetMetadataKey } from 'src/enum.js';
++import { AssetMetadataKey, Permission } from 'src/enum.js';
+ import { AssetService } from 'src/services/asset.service.js';
++import { authStub } from 'test/fixtures/auth.stub.js';
+ import { factory } from 'test/small.factory.js';
+ import { ControllerContext, controllerSetup, mockBaseService } from 'test/utils.js';
+ 
+@@ -72,6 +73,43 @@ describe(AssetController.name, () => {
+     });
+   });
+ 
++  describe('GET /assets/:id/chapters', () => {
++    it('validates the asset id', async () => {
++      const { status } = await request(ctx.getHttpServer()).get('/assets/invalid/chapters');
++      expect(status).toBe(400);
++      expect(service.getChapters).not.toHaveBeenCalled();
++    });
++
++    it('allows shared-link authentication and returns only chapter data', async () => {
++      const id = factory.uuid();
++      const chapters = [{ startTime: 0, endTime: 5, title: 'Intro' }];
++      ctx.authenticate.mockResolvedValue(authStub.adminSharedLink);
++      service.getChapters.mockResolvedValue(chapters);
++      const { status, body } = await request(ctx.getHttpServer()).get(`/assets/${id}/chapters?key=secret`);
++      expect(status).toBe(200);
++      expect(body).toEqual(chapters);
++      expect(service.getChapters).toHaveBeenCalledWith(authStub.adminSharedLink, id);
++      expect(ctx.authenticate).toHaveBeenCalledWith(
++        expect.objectContaining({
++          queryParams: { key: 'secret' },
++          metadata: expect.objectContaining({ permission: Permission.AssetRead, sharedLinkRoute: true }),
++        }),
++      );
++    });
++  });
++
++  describe('read-only chapter metadata', () => {
++    it.each(['/assets/metadata', '/assets/:id/metadata'])('rejects writes through %s', async (route) => {
++      const id = factory.uuid();
++      const { status } = await request(ctx.getHttpServer())
++        .put(route.replace(':id', () => id))
++        .send({ items: [{ assetId: id, key: AssetMetadataKey.VideoChapters, value: { chapters: [] } }] });
++      expect(status).toBe(400);
++      expect(service.upsertMetadata).not.toHaveBeenCalled();
++      expect(service.upsertBulkMetadata).not.toHaveBeenCalled();
++    });
++  });
++
+   describe('PUT /assets/copy', () => {
+     it('should require target and source id', async () => {
+       const { status, body } = await request(ctx.getHttpServer()).put('/assets/copy').send({});
+diff --git a/server/src/controllers/asset.controller.ts b/server/src/controllers/asset.controller.ts
+index 9e670a6d6..89ec2ca93 100644
+--- a/server/src/controllers/asset.controller.ts
++++ b/server/src/controllers/asset.controller.ts
+@@ -1,6 +1,7 @@
+ import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, Put, Query } from '@nestjs/common';
+ import { ApiExcludeEndpoint, ApiTags } from '@nestjs/swagger';
+ import { Endpoint, HistoryBuilder } from 'src/decorators.js';
++import { AssetChapterResponseDto } from 'src/dtos/asset-chapters.dto.js';
+ import { AssetResponseDto } from 'src/dtos/asset-response.dto.js';
+ import {
+   AssetBulkDeleteDto,
+@@ -171,6 +172,18 @@ export class AssetController {
+     return this.service.getMetadata(auth, id);
+   }
+ 
++  @Get(':id/chapters')
++  @Authenticated({ permission: Permission.AssetRead, sharedLink: true })
++  @Endpoint({
++    summary: 'Get embedded video chapters',
++    description:
++      'Retrieve read-only chapter titles and times extracted from the original video. Returns an empty list when no chapters are available.',
++    history: new HistoryBuilder().added('v3').beta('v3'),
++  })
++  getAssetChapters(@Auth() auth: AuthDto, @Param() { id }: UUIDParamDto): Promise<AssetChapterResponseDto[]> {
++    return this.service.getChapters(auth, id);
++  }
++
+   @Get(':id/ocr')
+   @Authenticated({ permission: Permission.AssetRead })
+   @Endpoint({
+diff --git a/server/src/controllers/index.spec.ts b/server/src/controllers/index.spec.ts
+index 2817fa825..38059be71 100644
+--- a/server/src/controllers/index.spec.ts
++++ b/server/src/controllers/index.spec.ts
+@@ -49,6 +49,7 @@ const SHARED_LINK_ROUTES = new Set([
+   'GET albums/:id',
+   'GET albums/:id/map-markers',
+   'GET assets/:id',
++  'GET assets/:id/chapters',
+   'GET assets/:id/original',
+   'GET assets/:id/thumbnail',
+   'GET assets/:id/video/playback',
+diff --git a/server/src/dtos/asset.dto.ts b/server/src/dtos/asset.dto.ts
+index bcdb19372..3a841ebf7 100644
+--- a/server/src/dtos/asset.dto.ts
++++ b/server/src/dtos/asset.dto.ts
+@@ -2,7 +2,7 @@ import { createZodDto } from 'nestjs-zod';
+ import z from 'zod';
+ import { HistoryBuilder } from 'src/decorators.js';
+ import { BulkIdsSchema } from 'src/dtos/asset-ids.response.dto.js';
+-import { AssetType, AssetVisibilitySchema } from 'src/enum.js';
++import { AssetMetadataKey, AssetType, AssetVisibilitySchema } from 'src/enum.js';
+ import { AssetStats } from 'src/repositories/asset.repository.js';
+ import { IsNotSiblingOf, isoDatetimeToDate, latitudeSchema, longitudeSchema, stringToBool } from 'src/validation.js';
+ 
+@@ -99,9 +99,14 @@ const AssetMetadataRouteParamsSchema = z
+   })
+   .meta({ id: 'AssetMetadataRouteParams' });
+ 
++const WritableMetadataKeySchema = z
++  .string()
++  .refine((key) => key !== AssetMetadataKey.VideoChapters, 'Embedded video chapters are read-only')
++  .describe('Metadata key');
++
+ export const AssetMetadataUpsertItemSchema = z
+   .object({
+-    key: z.string().describe('Metadata key'),
++    key: WritableMetadataKeySchema,
+     value: z.record(z.string(), z.unknown()).describe('Metadata value (object)'),
+   })
+   .meta({ id: 'AssetMetadataUpsertItemDto' });
+@@ -115,7 +120,7 @@ const AssetMetadataUpsertSchema = z
+ const AssetMetadataBulkUpsertItemSchema = z
+   .object({
+     assetId: z.uuidv4().describe('Asset ID'),
+-    key: z.string().describe('Metadata key'),
++    key: WritableMetadataKeySchema,
+     value: z.record(z.string(), z.unknown()).describe('Metadata value (object)'),
+   })
+   .meta({ id: 'AssetMetadataBulkUpsertItemDto' });
+diff --git a/server/src/enum.ts b/server/src/enum.ts
+index 8b7c8ab44..04b9da268 100644
+--- a/server/src/enum.ts
++++ b/server/src/enum.ts
+@@ -407,6 +407,7 @@ export const UserMetadataKeySchema = z
+ 
+ export enum AssetMetadataKey {
+   MobileApp = 'mobile-app',
++  VideoChapters = 'video-chapters',
+ }
+ 
+ export enum UserAvatarColor {
+diff --git a/server/src/repositories/media.repository.spec.ts b/server/src/repositories/media.repository.spec.ts
+index 02f413b3f..e5431f2a4 100644
+--- a/server/src/repositories/media.repository.spec.ts
++++ b/server/src/repositories/media.repository.spec.ts
+@@ -1,6 +1,7 @@
+ import { mkdtempDisposableSync, statSync } from 'node:fs';
+ import { tmpdir } from 'node:os';
+ import { join } from 'node:path';
++import { fileURLToPath } from 'node:url';
+ import sharp from 'sharp';
+ import { AssetEditAction, MirrorAxis } from 'src/dtos/editing.dto.js';
+ import { Colorspace, ImageFormat } from 'src/enum.js';
+@@ -68,6 +69,27 @@ describe(MediaRepository.name, () => {
+     sut = new MediaRepository(automock(LoggingRepository, { args: [, { getEnv: () => ({}) }], strict: false }));
+   });
+ 
++  describe('embedded chapters', () => {
++    const fixtures = fileURLToPath(new URL('../../test/fixtures/chapters/', import.meta.url));
++
++    it.each(['chapters.mp4', 'quicktime.mov', 'nero.mp4', 'chapters.mkv'])(
++      'extracts chapter times and titles from %s',
++      async (filename) => {
++        const result = await sut.probe(join(fixtures, filename));
++        expect(result.chapters).toEqual([
++          { startTime: 0, endTime: 1, title: 'Intro' },
++          { startTime: 1, endTime: 2, title: 'Snow = 雪' },
++          { startTime: 2, endTime: 3, title: null },
++        ]);
++      },
++    );
++
++    it('returns no chapters for a video without chapters', async () => {
++      const result = await sut.probe(join(fixtures, 'no-chapters.mp4'));
++      expect(result.chapters).toEqual([]);
++    });
++  });
++
+   describe('edit (single actions)', () => {
+     it('should apply crop edit correctly', async () => {
+       const result = sut['edit'](
+diff --git a/server/src/repositories/media.repository.ts b/server/src/repositories/media.repository.ts
+index 9f847a147..f842e636d 100644
+--- a/server/src/repositories/media.repository.ts
++++ b/server/src/repositories/media.repository.ts
+@@ -37,6 +37,7 @@ import type {
+   VideoInfo,
+   VideoPacketInfo,
+ } from 'src/types.js';
++import { extractChapters } from 'src/utils/chapters.js';
+ import { handlePromiseError } from 'src/utils/misc.js';
+ import { createAffineMatrix } from 'src/utils/transform.js';
+ 
+@@ -254,8 +255,9 @@ export class MediaRepository {
+   }
+ 
+   async probe(input: string, options?: ProbeOptions): Promise<VideoInfo> {
+-    const results = await probe(input, options?.countFrames ? ['-count_packets'] : []); // gets frame count quickly: https://stackoverflow.com/a/28376817
++    const results = await probe(input, ['-show_chapters', ...(options?.countFrames ? ['-count_packets'] : [])]);
+     return {
++      chapters: extractChapters(results.chapters, this.parseFloat(results.format.duration)),
+       format: {
+         formatName: results.format.format_name,
+         formatLongName: results.format.format_long_name,
+diff --git a/server/src/services/asset.service.spec.ts b/server/src/services/asset.service.spec.ts
+index a30753fbd..218e4b0c2 100755
+--- a/server/src/services/asset.service.spec.ts
++++ b/server/src/services/asset.service.spec.ts
+@@ -683,6 +683,87 @@ describe(AssetService.name, () => {
+     });
+   });
+ 
++  describe('getChapters', () => {
++    const id = 'asset-1';
++    const chapters = [{ startTime: 0, endTime: 5, title: 'Intro' }];
++
++    it('returns chapters for an asset owner', async () => {
++      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([id]));
++      mocks.asset.getMetadataByKey.mockResolvedValue({
++        key: AssetMetadataKey.VideoChapters,
++        value: { chapters },
++        updatedAt: new Date(),
++      });
++      await expect(sut.getChapters(authStub.admin, id)).resolves.toEqual(chapters);
++      expect(mocks.asset.getMetadataByKey).toHaveBeenCalledWith(id, AssetMetadataKey.VideoChapters);
++    });
++
++    it.each([undefined, { chapters: [] }, { chapters: [{ startTime: 'bad' }] }])(
++      'returns no chapters for absent or malformed chapter metadata: %s',
++      async (value) => {
++        mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([id]));
++        mocks.asset.getMetadataByKey.mockResolvedValue(
++          value
++            ? {
++                key: AssetMetadataKey.VideoChapters,
++                value,
++                updatedAt: new Date(),
++              }
++            : undefined,
++        );
++        await expect(sut.getChapters(authStub.admin, id)).resolves.toEqual([]);
++      },
++    );
++
++    it('allows chapters through a shared link even when EXIF and downloads are disabled', async () => {
++      const auth = {
++        ...authStub.adminSharedLink,
++        sharedLink: {
++          ...authStub.adminSharedLink.sharedLink,
++          showExif: false,
++          allowDownload: false,
++        },
++      };
++      mocks.access.asset.checkSharedLinkAccess.mockResolvedValue(new Set([id]));
++      mocks.asset.getMetadataByKey.mockResolvedValue({
++        key: AssetMetadataKey.VideoChapters,
++        value: { chapters },
++        updatedAt: new Date(),
++      });
++      await expect(sut.getChapters(auth, id)).resolves.toEqual(chapters);
++      expect(mocks.access.asset.checkSharedLinkAccess).toHaveBeenCalledWith(auth.sharedLink.id, new Set([id]));
++      expect(mocks.access.asset.checkOwnerAccess).not.toHaveBeenCalled();
++    });
++
++    it.each([authStub.admin, authStub.adminSharedLink])('rejects unauthorized asset access', async (auth) => {
++      await expect(sut.getChapters(auth, id)).rejects.toBeInstanceOf(BadRequestException);
++      expect(mocks.asset.getMetadataByKey).not.toHaveBeenCalled();
++    });
++  });
++
++  describe('read-only chapters', () => {
++    it('rejects deleting chapter metadata', async () => {
++      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
++      await expect(sut.deleteMetadataByKey(authStub.admin, 'asset-1', AssetMetadataKey.VideoChapters)).rejects.toThrow(
++        'Embedded video chapters are read-only',
++      );
++      expect(mocks.asset.deleteMetadataByKey).not.toHaveBeenCalled();
++    });
++
++    it('rejects bulk deleting chapter metadata before deleting any items', async () => {
++      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set(['asset-1']));
++      await expect(
++        sut.deleteBulkMetadata(authStub.admin, {
++          items: [
++            { assetId: 'asset-1', key: 'custom' },
++            { assetId: 'asset-1', key: AssetMetadataKey.VideoChapters },
++          ],
++        }),
++      ).rejects.toThrow('Embedded video chapters are read-only');
++      expect(mocks.asset.deleteBulkMetadata).not.toHaveBeenCalled();
++    });
++  });
++
+   describe('getOcr', () => {
+     it('should require asset read permission', async () => {
+       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+diff --git a/server/src/services/asset.service.ts b/server/src/services/asset.service.ts
+index e53d20f64..28a06c780 100644
+--- a/server/src/services/asset.service.ts
++++ b/server/src/services/asset.service.ts
+@@ -3,6 +3,7 @@ import { isUndefined, omitBy } from 'lodash-es';
+ import { DateTime, Duration } from 'luxon';
+ import type { AssetFile } from 'src/database.js';
+ import { OnJob } from 'src/decorators.js';
++import { AssetChapterResponseDto, AssetChapterSchema } from 'src/dtos/asset-chapters.dto.js';
+ import { AssetResponseDto, SanitizedAssetResponseDto, mapAsset } from 'src/dtos/asset-response.dto.js';
+ import {
+   AssetBulkDeleteDto,
+@@ -29,6 +30,7 @@ import {
+ import { AssetOcrResponseDto } from 'src/dtos/ocr.dto.js';
+ import {
+   AssetFileType,
++  AssetMetadataKey,
+   AssetStatus,
+   AssetType,
+   AssetVisibility,
+@@ -390,6 +392,13 @@ export class AssetService extends BaseService {
+     return this.assetRepository.getMetadata(id);
+   }
+ 
++  async getChapters(auth: AuthDto, id: string): Promise<AssetChapterResponseDto[]> {
++    await this.requireAccess({ auth, permission: Permission.AssetRead, ids: [id] });
++    const metadata = await this.assetRepository.getMetadataByKey(id, AssetMetadataKey.VideoChapters);
++    const result = AssetChapterSchema.array().safeParse(metadata?.value.chapters ?? []);
++    return result.success ? result.data : [];
++  }
++
+   async getOcr(auth: AuthDto, id: string): Promise<AssetOcrResponseDto[]> {
+     await this.requireAccess({ auth, permission: Permission.AssetRead, ids: [id] });
+     const ocr = await this.ocrRepository.getByAssetId(id);
+@@ -413,6 +422,7 @@ export class AssetService extends BaseService {
+ 
+     const uniqueKeys = new Set<string>();
+     for (const item of dto.items) {
++      this.requireWritableMetadata(item.key);
+       const key = `(${item.assetId}, ${item.key})`;
+       if (uniqueKeys.has(key)) {
+         throw new BadRequestException(`Duplicate items are not allowed: "${key}"`);
+@@ -429,6 +439,7 @@ export class AssetService extends BaseService {
+ 
+     const uniqueKeys = new Set<string>();
+     for (const { key } of dto.items) {
++      this.requireWritableMetadata(key);
+       if (uniqueKeys.has(key)) {
+         throw new BadRequestException(`Duplicate items are not allowed: "${key}"`);
+       }
+@@ -451,14 +462,24 @@ export class AssetService extends BaseService {
+ 
+   async deleteMetadataByKey(auth: AuthDto, id: string, key: string): Promise<void> {
+     await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: [id] });
++    this.requireWritableMetadata(key);
+     return this.assetRepository.deleteMetadataByKey(id, key);
+   }
+ 
+   async deleteBulkMetadata(auth: AuthDto, dto: AssetMetadataBulkDeleteDto) {
+     await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: dto.items.map((item) => item.assetId) });
++    for (const { key } of dto.items) {
++      this.requireWritableMetadata(key);
++    }
+     await this.assetRepository.deleteBulkMetadata(dto.items);
+   }
+ 
++  private requireWritableMetadata(key: string) {
++    if (key === AssetMetadataKey.VideoChapters) {
++      throw new BadRequestException('Embedded video chapters are read-only');
++    }
++  }
++
+   async run(auth: AuthDto, dto: AssetJobsDto) {
+     await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: dto.assetIds });
+ 
+diff --git a/server/src/services/metadata.service.spec.ts b/server/src/services/metadata.service.spec.ts
+index 255889eae..f07d082e1 100644
+--- a/server/src/services/metadata.service.spec.ts
++++ b/server/src/services/metadata.service.spec.ts
+@@ -7,6 +7,7 @@ import { StorageCore, ThumbnailPathEntity } from 'src/cores/storage.core.js';
+ import { defaults } from 'src/dtos/config.dto.js';
+ import {
+   AssetFileType,
++  AssetMetadataKey,
+   AssetType,
+   AssetVisibility,
+   ChecksumAlgorithm,
+@@ -172,6 +173,7 @@ describe(MetadataService.name, () => {
+     beforeEach(() => {
+       const time = new Date('2022-01-01T00:00:00.000Z');
+       const timeMs = time.valueOf();
++      mocks.asset.upsertMetadata.mockResolvedValue([]);
+       mocks.storage.stat.mockResolvedValue({
+         size: 123_456,
+         mtime: time,
+@@ -180,6 +182,35 @@ describe(MetadataService.name, () => {
+       } as Stats);
+     });
+ 
++    it('persists embedded chapters and replaces them when chapters are removed', async () => {
++      const asset = AssetFactory.create({ type: AssetType.Video });
++      const chapters = [{ startTime: 1.25, endTime: 3, title: 'Intro' }];
++      mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
++      mocks.asset.upsertMetadata.mockResolvedValue([]);
++      mocks.media.probe.mockResolvedValue({ ...videoInfoStub.videoStreamH264, chapters });
++
++      await sut.handleMetadataExtraction({ id: asset.id });
++
++      expect(mocks.asset.upsertMetadata).toHaveBeenLastCalledWith(asset.id, [
++        { key: AssetMetadataKey.VideoChapters, value: { chapters } },
++      ]);
++
++      mocks.media.probe.mockResolvedValue({ ...videoInfoStub.videoStreamH264, chapters: [] });
++      mockReadTags();
++      await sut.handleMetadataExtraction({ id: asset.id });
++
++      expect(mocks.asset.upsertMetadata).toHaveBeenLastCalledWith(asset.id, [
++        { key: AssetMetadataKey.VideoChapters, value: { chapters: [] } },
++      ]);
++    });
++
++    it('does not store video chapters for images', async () => {
++      const asset = AssetFactory.create({ type: AssetType.Image });
++      mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
++      await sut.handleMetadataExtraction({ id: asset.id });
++      expect(mocks.asset.upsertMetadata).not.toHaveBeenCalled();
++    });
++
+     it('should handle an asset that could not be found', async () => {
+       mocks.assetJob.getForMetadataExtraction.mockResolvedValue(void 0);
+ 
+diff --git a/server/src/services/metadata.service.ts b/server/src/services/metadata.service.ts
+index 1e968eda8..0e1e51112 100644
+--- a/server/src/services/metadata.service.ts
++++ b/server/src/services/metadata.service.ts
+@@ -11,6 +11,7 @@ import { Asset, AssetFile } from 'src/database.js';
+ import { OnEvent, OnJob } from 'src/decorators.js';
+ import {
+   AssetFileType,
++  AssetMetadataKey,
+   AssetType,
+   AssetVisibility,
+   ChecksumAlgorithm,
+@@ -240,7 +241,7 @@ export class MetadataService extends BaseService {
+       this.getExifTags(asset),
+       this.storageRepository.stat(asset.originalPath),
+     ]);
+-    const { tags: exifTags, audio, video, packets, format } = exifResult;
++    const { tags: exifTags, audio, video, packets, format, chapters } = exifResult;
+     this.logger.verbose('Exif Tags', exifTags);
+ 
+     const dates = this.getDates(asset, exifTags, stats);
+@@ -369,6 +370,12 @@ export class MetadataService extends BaseService {
+ 
+     const tasks = new Tasks();
+ 
++    if (asset.type === AssetType.Video) {
++      tasks.push(() =>
++        this.assetRepository.upsertMetadata(asset.id, [{ key: AssetMetadataKey.VideoChapters, value: { chapters } }]),
++      );
++    }
++
+     tasks.push(
+       () =>
+         this.assetRepository.update({
+@@ -625,6 +632,7 @@ export class MetadataService extends BaseService {
+       video: videoResult?.video,
+       packets: videoResult?.packets,
+       format: videoResult?.format ?? null,
++      chapters: videoResult?.chapters ?? [],
+     };
+   }
+ 
+@@ -1119,7 +1127,7 @@ export class MetadataService extends BaseService {
+   }
+ 
+   private async getVideoTags(originalPath: string) {
+-    const { videoStreams, audioStreams, format } = await this.mediaRepository.probe(originalPath);
++    const { videoStreams, audioStreams, format, chapters } = await this.mediaRepository.probe(originalPath);
+     const video = videoStreams[0];
+     const audio = audioStreams[0];
+     const packets = video?.timeBase ? await this.mediaRepository.probePackets(originalPath, video.index) : null;
+@@ -1158,7 +1166,7 @@ export class MetadataService extends BaseService {
+       tags.Duration = format.duration;
+     }
+ 
+-    return { tags, audio, video, packets, format };
++    return { tags, audio, video, packets, format, chapters };
+   }
+ 
+   private getHeifOrientation(exifTags: ImmichTags): ExifOrientation | null {
+diff --git a/server/src/types.ts b/server/src/types.ts
+index d6310dc40..b37aacae5 100644
+--- a/server/src/types.ts
++++ b/server/src/types.ts
+@@ -3,6 +3,7 @@ import { ShallowDehydrateObject } from 'kysely';
+ import { Mocked } from 'vitest';
+ import { VECTOR_EXTENSIONS } from 'src/constants.js';
+ import { AssetFile } from 'src/database.js';
++import { AssetChapterResponseDto } from 'src/dtos/asset-chapters.dto.js';
+ import { UploadFieldName } from 'src/dtos/asset-media.dto.js';
+ import { AuthDto } from 'src/dtos/auth.dto.js';
+ import { SystemConfig } from 'src/dtos/config.dto.js';
+@@ -143,6 +144,7 @@ export interface VideoInfo {
+   format: VideoFormat;
+   videoStreams: VideoStreamInfo[];
+   audioStreams: AudioStreamInfo[];
++  chapters: AssetChapterResponseDto[];
+ }
+ 
+ export interface TranscodeCommand {
+diff --git a/server/test/fixtures/media.stub.ts b/server/test/fixtures/media.stub.ts
+index efbb3e4e9..907a884b9 100644
+--- a/server/test/fixtures/media.stub.ts
++++ b/server/test/fixtures/media.stub.ts
+@@ -43,6 +43,7 @@ const probeStubDefaultVideoStream: VideoStreamInfo[] = [
+ const probeStubDefaultAudioStream: AudioStreamInfo[] = [{ index: 3, codecName: 'mp3', bitrate: 100, profile: null }];
+ 
+ const probeStubDefault: VideoInfo = {
++  chapters: [],
+   format: probeStubDefaultFormat,
+   videoStreams: probeStubDefaultVideoStream,
+   audioStreams: probeStubDefaultAudioStream,
+diff --git a/server/test/medium/specs/services/asset.service.spec.ts b/server/test/medium/specs/services/asset.service.spec.ts
+index 858c62044..5bb0e1d88 100644
+--- a/server/test/medium/specs/services/asset.service.spec.ts
++++ b/server/test/medium/specs/services/asset.service.spec.ts
+@@ -46,6 +46,39 @@ beforeAll(async () => {
+ });
+ 
+ describe(AssetService.name, () => {
++  describe('getChapters', () => {
++    it.each([SharedLinkType.Individual, SharedLinkType.Album])(
++      'limits %s shared-link chapter access to its assets',
++      async (type) => {
++        const { sut, ctx } = setup();
++        const { user } = await ctx.newUser();
++        const { user: otherUser } = await ctx.newUser();
++        const { asset } = await ctx.newAsset({ ownerId: user.id });
++        const { asset: unshared } = await ctx.newAsset({ ownerId: user.id });
++        const chapters = [{ startTime: 0, endTime: 5, title: 'Intro' }];
++        await ctx.newMetadata({ assetId: asset.id, key: AssetMetadataKey.VideoChapters, value: { chapters } });
++        await ctx.newMetadata({ assetId: unshared.id, key: AssetMetadataKey.VideoChapters, value: { chapters } });
++        const { album } = await ctx.newAlbum({ ownerId: user.id }, [asset.id]);
++        const sharedLink = await ctx.get(SharedLinkRepository).create({
++          userId: user.id,
++          key: Buffer.from(factory.uuid()),
++          type,
++          allowUpload: false,
++          allowDownload: false,
++          showExif: false,
++          ...(type === SharedLinkType.Album ? { albumId: album.id } : { assetIds: [asset.id] }),
++        });
++        const auth = factory.auth({ user: { id: user.id }, sharedLink });
++        await expect(sut.getChapters(auth, asset.id)).resolves.toEqual(chapters);
++        await expect(sut.getChapters(auth, unshared.id)).rejects.toThrow('Not found or no asset.read access');
++        await expect(sut.getChapters(factory.auth({ user: otherUser }), asset.id)).rejects.toThrow(
++          'Not found or no asset.read access',
++        );
++        await expect(sut.getChapters(factory.auth({ user }), asset.id)).resolves.toEqual(chapters);
++      },
++    );
++  });
++
+   describe('get', () => {
+     it('should not return an asset of another user', async () => {
+       const { sut, ctx } = setup();
+diff --git a/server/test/medium/specs/services/metadata.service.spec.ts b/server/test/medium/specs/services/metadata.service.spec.ts
+index 68452cd54..d863fbbff 100644
+--- a/server/test/medium/specs/services/metadata.service.spec.ts
++++ b/server/test/medium/specs/services/metadata.service.spec.ts
+@@ -1,13 +1,16 @@
+ import { Kysely } from 'kysely';
+ import { Stats } from 'node:fs';
+-import { mkdtempDisposable, writeFile } from 'node:fs/promises';
++import { mkdtempDisposable, readFile, writeFile } from 'node:fs/promises';
+ import { tmpdir } from 'node:os';
+ import { join } from 'node:path';
++import { fileURLToPath } from 'node:url';
++import { AssetMetadataKey, AssetType } from 'src/enum.js';
+ import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
+ import { AssetRepository } from 'src/repositories/asset.repository.js';
+ import { ConfigRepository } from 'src/repositories/config.repository.js';
+ import { EventRepository } from 'src/repositories/event.repository.js';
+ import { LoggingRepository } from 'src/repositories/logging.repository.js';
++import { MediaRepository } from 'src/repositories/media.repository.js';
+ import { MetadataRepository } from 'src/repositories/metadata.repository.js';
+ import { StorageRepository } from 'src/repositories/storage.repository.js';
+ import { SystemMetadataRepository } from 'src/repositories/system-metadata.repository.js';
+@@ -31,7 +34,7 @@ type TimeZoneTest = {
+ let defaultDatabase: Kysely<DB>;
+ 
+ // eslint-disable-next-line unicorn/no-unnecessary-parameters
+-const setup = (db?: Kysely<DB>, { realStorage = false } = {}) => {
++const setup = (db?: Kysely<DB>, { realStorage = false, realMedia = false } = {}) => {
+   const { sut, ctx } = newMediumService(MetadataService, {
+     database: db || defaultDatabase,
+     real: [
+@@ -41,6 +44,7 @@ const setup = (db?: Kysely<DB>, { realStorage = false } = {}) => {
+       MetadataRepository,
+       SystemMetadataRepository,
+       TagRepository,
++      ...(realMedia ? [MediaRepository] : []),
+       ...(realStorage ? [StorageRepository] : []),
+     ],
+     mock: [EventRepository, LoggingRepository, ...(realStorage ? [] : [StorageRepository])],
+@@ -81,6 +85,38 @@ describe(MetadataService.name, () => {
+     expect(sut).toBeDefined();
+   });
+ 
++  it('extracts and replaces persisted video chapters without changing the original file', async () => {
++    const { sut, ctx } = setup(undefined, { realStorage: true, realMedia: true });
++    const originalPath = fileURLToPath(new URL('../../../fixtures/chapters/chapters.mp4', import.meta.url));
++    const contents = await readFile(originalPath);
++    const { user } = await ctx.newUser();
++    const { asset } = await ctx.newAsset({ ownerId: user.id, type: AssetType.Video, originalPath });
++    ctx.getMock(EventRepository).emit.mockResolvedValue();
++
++    await sut.handleMetadataExtraction({ id: asset.id });
++
++    const repository = ctx.get(AssetRepository);
++    await expect(repository.getMetadataByKey(asset.id, AssetMetadataKey.VideoChapters)).resolves.toMatchObject({
++      value: {
++        chapters: [
++          { startTime: 0, endTime: 1, title: 'Intro' },
++          { startTime: 1, endTime: 2, title: 'Snow = 雪' },
++          { startTime: 2, endTime: 3, title: null },
++        ],
++      },
++    });
++    await expect(readFile(originalPath)).resolves.toEqual(contents);
++
++    await repository.update({
++      id: asset.id,
++      originalPath: fileURLToPath(new URL('../../../fixtures/chapters/no-chapters.mp4', import.meta.url)),
++    });
++    await sut.handleMetadataExtraction({ id: asset.id });
++    await expect(repository.getMetadataByKey(asset.id, AssetMetadataKey.VideoChapters)).resolves.toMatchObject({
++      value: { chapters: [] },
++    });
++  });
++
+   describe('sidecar metadata extraction', () => {
+     it('should persist metadata read from a discovered XMP sidecar', async () => {
+       await using tempDir = await mkdtempDisposable(join(tmpdir(), 'immich-sidecar-'));
+diff --git a/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte b/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte
+index 6f775e2be..6d0e006bb 100644
+--- a/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte
++++ b/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte
+@@ -1,11 +1,14 @@
+ <script lang="ts">
++  import VideoChapterMenu from '#lib/components/asset-viewer/VideoChapterMenu.svelte';
+   import VideoRemoteViewer from '#lib/components/asset-viewer/VideoRemoteViewer.svelte';
++  import VideoTimeline from '#lib/components/asset-viewer/VideoTimeline.svelte';
+   import FaceEditor from '#lib/components/asset-viewer/face-editor/FaceEditor.svelte';
+   import { assetViewerFadeDuration } from '#lib/constants.ts';
+   import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+   import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+   import { castManager } from '#lib/managers/cast-manager.svelte.ts';
+   import { mediaCapabilitiesManager } from '#lib/managers/media-capabilities-manager.svelte.ts';
++  import { getAssetChaptersQuery } from '#lib/queries/asset.query.ts';
+   import { createPreloadedQuery } from '#lib/queries/client.ts';
+   import { getPublicConfigQuery } from '#lib/queries/config-public.query.ts';
+   import { autoPlayVideo, lang, loopVideo as loopVideoPreference } from '#lib/stores/preferences.store.ts';
+@@ -25,6 +28,7 @@
+     mdiVolumeMedium,
+     mdiVolumeMute,
+   } from '@mdi/js';
++  import { createQuery } from '@tanstack/svelte-query';
+   import 'hls-video-element';
+   import type HlsVideoElement from 'hls-video-element';
+   import Hls, { AbrController, Events, type FragLoadedData, type FragLoadingData, type HlsConfig } from 'hls.js';
+@@ -45,7 +49,6 @@
+   import { useSwipe, type SwipeCustomEvent } from 'svelte-gestures';
+   import { t } from 'svelte-i18n';
+   import { fade } from 'svelte/transition';
+-  import './immich-time-range';
+ 
+   const query = createPreloadedQuery(getPublicConfigQuery);
+   const publicConfig = $derived(query.data);
+@@ -79,6 +82,20 @@
+   }: Props = $props();
+ 
+   let videoPlayer: HTMLVideoElement | undefined = $state();
++  const chaptersQuery = createQuery(() => getAssetChaptersQuery(assetId, cacheKey));
++  const chapters = $derived(chaptersQuery.data ?? []);
++  let currentTime = $state(0);
++  let duration = $state(0);
++
++  const onTimeUpdate = () => {
++    currentTime = videoPlayer?.currentTime ?? 0;
++  };
++
++  const onLoadedMetadata = () => {
++    hasLoadedMetadata = true;
++    duration = videoPlayer?.duration ?? 0;
++    onTimeUpdate();
++  };
+   let isLoading = $state(true);
+   let hasLoadedMetadata = $state(false);
+   let assetFileUrl = $derived.by(() => {
+@@ -247,6 +264,8 @@
+   $effect(() => {
+     // reactive on `assetFileUrl` changes
+     hasLoadedMetadata = false;
++    currentTime = 0;
++    duration = 0;
+     if (videoPlayer && assetFileUrl) {
+       hasFocused = false;
+       rebuildCount = 0;
+@@ -391,7 +410,9 @@
+             {...useSwipe(onSwipe)}
+             class="h-full object-contain"
+             oncanplay={(e: Event) => handleCanPlay(e.currentTarget as HTMLVideoElement)}
+-            onloadedmetadata={() => (hasLoadedMetadata = true)}
++            onloadedmetadata={onLoadedMetadata}
++            ontimeupdate={onTimeUpdate}
++            ondurationchange={() => (duration = videoPlayer?.duration ?? 0)}
+             onended={onVideoEnded}
+             onseeking={onSeeking}
+             onplaying={(e: Event) => {
+@@ -417,7 +438,9 @@
+             {...useSwipe(onSwipe)}
+             class="h-full object-contain"
+             oncanplay={(e) => handleCanPlay(e.currentTarget)}
+-            onloadedmetadata={() => (hasLoadedMetadata = true)}
++            onloadedmetadata={onLoadedMetadata}
++            ontimeupdate={onTimeUpdate}
++            ondurationchange={() => (duration = videoPlayer?.duration ?? 0)}
+             onended={onVideoEnded}
+             onseeking={onSeeking}
+             onplaying={(e) => {
+@@ -470,6 +493,8 @@
+ 
+             <span class="grow"></span>
+ 
++            <VideoChapterMenu {chapters} player={videoPlayer} ready={hasLoadedMetadata} {currentTime} />
++
+             <div
+               class="volume-wrapper shrink-0 rounded-full bg-light-100/0 transition-colors duration-400 hover:bg-light-100"
+             >
+@@ -490,7 +515,7 @@
+               <media-settings-menu-button class="shrink-0 rounded-full p-2 outline-none"></media-settings-menu-button>
+             {/if}
+           </media-control-bar>
+-          <immich-time-range class="h-8 w-full rounded-lg px-2 pb-3 outline-none"></immich-time-range>
++          <VideoTimeline {chapters} {duration} />
+         </div>
+       </media-controller>
+ 
+@@ -548,12 +573,12 @@
+     font-variant-numeric: tabular-nums;
+   }
+ 
+-  immich-time-range,
++  :global(immich-time-range),
+   media-volume-range {
+     --media-control-hover-background: none;
+   }
+ 
+-  immich-time-range:hover,
++  :global(immich-time-range:hover),
+   media-volume-range:hover {
+     --media-range-thumb-opacity: 1;
+   }
+diff --git a/web/test/common/handlers.ts b/web/test/common/handlers.ts
+index 06051f777..72b6cb17e 100644
+--- a/web/test/common/handlers.ts
++++ b/web/test/common/handlers.ts
+@@ -74,6 +74,7 @@ export const createHandlers = (data: MockData): Handlers => {
+     },
+     restoreAssets: ({ body }) => ({ json: { count: data.restoreAssets(body.ids) } }),
+     getAssetOcr: ({ params }) => ({ json: data.getOcr(params.id) }),
++    getAssetChapters: () => ({ json: [] }),
+     checkBulkUpload: ({ body }) => ({
+       json: { results: body.assets.map(({ id }) => ({ id, action: AssetUploadAction.Accept })) },
+     }),
+diff --git a/server/src/dtos/asset-chapters.dto.ts b/server/src/dtos/asset-chapters.dto.ts
+new file mode 100644
+index 000000000..ef310dd3f
+--- /dev/null
++++ b/server/src/dtos/asset-chapters.dto.ts
+@@ -0,0 +1,13 @@
++import { createZodDto } from 'nestjs-zod';
++import z from 'zod';
++
++export const AssetChapterSchema = z
++  .object({
++    startTime: z.number().nonnegative().meta({ format: 'double' }).describe('Chapter start time in seconds'),
++    endTime: z.number().positive().meta({ format: 'double' }).describe('Chapter end time in seconds'),
++    title: z.string().nullable().describe('Embedded chapter title, if present'),
++  })
++  .refine(({ startTime, endTime }) => endTime > startTime)
++  .meta({ id: 'AssetChapterResponseDto' });
++
++export class AssetChapterResponseDto extends createZodDto(AssetChapterSchema) {}
+diff --git a/server/src/utils/chapters.spec.ts b/server/src/utils/chapters.spec.ts
+new file mode 100644
+index 000000000..43984490f
+--- /dev/null
++++ b/server/src/utils/chapters.spec.ts
+@@ -0,0 +1,53 @@
++import { extractChapters } from 'src/utils/chapters.js';
++
++describe('extractChapters', () => {
++  it.each([undefined, null, {}, 'chapters'])('ignores invalid chapter collections: %s', (input) => {
++    expect(extractChapters(input, 10)).toEqual([]);
++  });
++
++  it('sorts chapters, limits them to the video duration and preserves titles', () => {
++    expect(
++      extractChapters(
++        [
++          { start_time: '5.125', end_time: '12', 'TAG:title': String.raw`雪 = \nHello\\World` },
++          { start_time: 0, end_time: 5.125, 'TAG:title': '  Intro  ' },
++        ],
++        10,
++      ),
++    ).toEqual([
++      { startTime: 0, endTime: 5.125, title: 'Intro' },
++      { startTime: 5.125, endTime: 10, title: '雪 = \nHello\\World' },
++    ]);
++  });
++
++  it('preserves valid chapters without titles or a known duration', () => {
++    expect(extractChapters([{ start_time: '1', end_time: '2' }], 0)).toEqual([
++      { startTime: 1, endTime: 2, title: null },
++    ]);
++    expect(extractChapters([{ start_time: 1, end_time: 2, 'TAG:title': 42 }], NaN)).toEqual([
++      { startTime: 1, endTime: 2, title: null },
++    ]);
++  });
++
++  it('ignores malformed chapters and duplicate starts without losing valid entries', () => {
++    expect(
++      extractChapters(
++        [
++          null,
++          {},
++          { start_time: '', end_time: 1 },
++          { start_time: null, end_time: 1 },
++          { start_time: 'N/A', end_time: 1 },
++          { start_time: -1, end_time: 1 },
++          { start_time: 1, end_time: Infinity },
++          { start_time: 2, end_time: 1 },
++          { start_time: 1, end_time: 1 },
++          { start_time: 10, end_time: 11 },
++          { start_time: 0, end_time: 1, 'TAG:title': ' '.repeat(3) },
++          { start_time: 0, end_time: 2, 'TAG:title': 'Duplicate' },
++        ],
++        10,
++      ),
++    ).toEqual([{ startTime: 0, endTime: 1, title: null }]);
++  });
++});
+diff --git a/server/src/utils/chapters.ts b/server/src/utils/chapters.ts
+new file mode 100644
+index 000000000..871248518
+--- /dev/null
++++ b/server/src/utils/chapters.ts
+@@ -0,0 +1,49 @@
++import z from 'zod';
++import { AssetChapterResponseDto, AssetChapterSchema } from 'src/dtos/asset-chapters.dto.js';
++
++const timestamp = z
++  .union([z.number(), z.string().trim().min(1)])
++  .transform(Number)
++  .pipe(z.number().nonnegative());
++const ProbeChapterSchema = z.object({
++  start_time: timestamp,
++  end_time: timestamp,
++  'TAG:title': z.unknown().optional(),
++});
++
++export const extractChapters = (input: unknown, duration: number): AssetChapterResponseDto[] => {
++  if (!Array.isArray(input)) {
++    return [];
++  }
++
++  const chapters: AssetChapterResponseDto[] = [];
++  for (const item of input) {
++    const result = ProbeChapterSchema.safeParse(item);
++    if (!result.success) {
++      continue;
++    }
++
++    const { start_time: startTime, end_time: endTime, 'TAG:title': rawTitle } = result.data;
++    const title =
++      typeof rawTitle === 'string'
++        ? rawTitle
++            .replaceAll(
++              /\\([\\nrtbf])/g,
++              (_, char: string) => ({ n: '\n', r: '\r', t: '\t', b: '\b', f: '\f' })[char] ?? char,
++            )
++            .trim()
++        : '';
++    const chapter = AssetChapterSchema.safeParse({
++      startTime,
++      endTime: Number.isFinite(duration) && duration > 0 ? Math.min(endTime, duration) : endTime,
++      title: title || null,
++    });
++    if (chapter.success) {
++      chapters.push(chapter.data);
++    }
++  }
++
++  return chapters
++    .sort((a, b) => a.startTime - b.startTime)
++    .filter((chapter, index, sorted) => index === 0 || chapter.startTime !== sorted[index - 1].startTime);
++};
+diff --git a/server/test/fixtures/chapters/README.md b/server/test/fixtures/chapters/README.md
+new file mode 100644
+index 000000000..9d2c65c60
+--- /dev/null
++++ b/server/test/fixtures/chapters/README.md
+@@ -0,0 +1,22 @@
++These synthetic, three-second, 32×32 H.264 fixtures contain no personal media.
++The chapter metadata uses the millisecond FFmetadata format written by
++[LosslessCut](https://github.com/mifi/lossless-cut/blob/master/src/renderer/src/hooks/useFfmpegOperations.ts).
++
++From this directory, generate the files with FFmpeg:
++
++```sh
++ffmpeg -f lavfi -i color=size=32x32:rate=2:duration=3 -c:v libx264 -pix_fmt yuv420p no-chapters.mp4
++ffmpeg -i no-chapters.mp4 -i chapters.ffmetadata -map 0:v -map_metadata 1 -map_chapters 1 -c copy chapters.mp4
++ffmpeg -i no-chapters.mp4 -i chapters.ffmetadata -map 0:v -map_metadata 1 -map_chapters 1 -c copy -movflags disable_chpl quicktime.mov
++ffmpeg -i no-chapters.mp4 -i chapters.ffmetadata -map 0:v -map_metadata 1 -map_chapters 1 -c copy chapters.mkv
++python3 -c "from pathlib import Path; Path('nero.mp4').write_bytes(Path('chapters.mp4').read_bytes().replace(b'chap', b'free'))"
++```
++
++`chapters.mp4` has both QuickTime chapter tracks and a Nero `chpl` atom.
++`quicktime.mov` omits the Nero atom. `nero.mp4` disables the QuickTime chapter
++track reference by replacing its `chap` atom type with `free`, leaving FFprobe
++to read only Nero chapters. `chapters.mkv` has Matroska chapters. Every chaptered
++fixture has a Unicode title and an untitled chapter.
++
++Production extraction only reads the original file with FFprobe. Fixture creation
++and remuxing are test-data preparation, separate from application behavior.
+diff --git a/server/test/fixtures/chapters/chapters.ffmetadata b/server/test/fixtures/chapters/chapters.ffmetadata
+new file mode 100644
+index 000000000..879f88dd5
+--- /dev/null
++++ b/server/test/fixtures/chapters/chapters.ffmetadata
+@@ -0,0 +1,16 @@
++;FFMETADATA1
++[CHAPTER]
++TIMEBASE=1/1000
++START=0
++END=1000
++title=Intro
++[CHAPTER]
++TIMEBASE=1/1000
++START=1000
++END=2000
++title=Snow \= 雪
++[CHAPTER]
++TIMEBASE=1/1000
++START=2000
++END=3000
++title=
+diff --git a/server/test/fixtures/chapters/chapters.mkv b/server/test/fixtures/chapters/chapters.mkv
+new file mode 100644
+index 0000000000000000000000000000000000000000..602e767379fc16a61fbc907c0562026ae202dbfb
+GIT binary patch
+literal 1618
+zcmbtVeQeZZ7=L?%3H}3^fP^Siz{D7K*WQhZGfj3MjXPzV*|GVD(b{X@yDRIpUE8sn
+zns~i+?8Zl66GgUVWE>Gckf3CsF6O3=WJpl{auQG>Br0OS4<h)7%;&uuAb;DmZ=dJ)
+zd!FZgKHjv;_#X;|&}N4UU5DonXHMu(XI?0mPm8vxTWw;f7oZ-;vow}XQixoY%NI2a
+z*<Tmk`<s{L8pgNA-g6g6-$}#{I-_N6$%aF1pj~Yk-v->m@Bt%sFh^}KtM_gAA_=Oe
+zvaCK38wcB5rRUdja1<%+@jn-m&xxWtN<DS_(diGm7li5>vfI{+n-VpCZ@|kk%(KC}
+zRBQjvMJ+GuD^4wUR<D|@=NE3Aj`Zd04j838NIi9L7G3$(Y39&untjs_WgX9N3H&nl
+z-SElWu!B~P4R?2F^5z|_Lc=rslhwXxtjQN_4R<@#s*Bz3gQqY$zw59=f8x-Cj;G~t
+zzU7!hwR{BP6$jm_-h+^|?|n)}_s(2EOOx<EcqXdOsY9p&k%g+5?88|KRi-XqJh^h>
+zpBpz2>F>3odn7&F&wo6doy?zgsH4Nyq(k*PXuy49@Jp24-qRD+V5s3&NS;Uc1MBH8
+zQ3G!0+Fd9+(6c3`>76u3UmALM)@l%}D*8+OfcxR;7f?3elPz;(l69XK-M>aQEw`+_
+z(nK~nwTCbC@{Qr92;Us(y}QL$-5b)xR_RX9l2apmVOxE$F|wX-78-*MJh-$fGS=%w
+zO;)j)oEqW_eXV?Bq^VhmMu2^edH(jDoZ9!_&0dG`N-$oQCG(|KC7$uuR41oK`9eO@
+z(j43nZEB44zQ!=M<PLb5TNhdpKH3rX7TrS+Jw5u9g9@Pu2caxNp1qZGXJ&@Z@s~dR
+z@l5@(H`aVhpILR~DhW$h(UNXrnypz2V!an29~pX8H4PI7PR0@tVcqCbal)qk3=^pG
+zGk#*7vTdW*=j-h3^ll=>s-ouA&7_aS^``8!3O2f7E4pUY(vlb#C61*{oZteqjN_^<
+zwQ+1Mlt7D`sCHSHV={qSCd0A;I*qv$&d^pz9Hhr+!|DQ8SOrt&Sg5#`frU;h87vDV
+zA`2dZDQZc~u{E@mGWE15fGbPeCRSC&0%=`loh;cPNbPBkffPjfC0)aupIyVUbV9Uj
+z!LZsCgIJUUv>Sq+NLbkBs{FK_GQoocQgyveOo1ZY!7NpgAeUPJLu+Pf4@rT~56MH(
+zY;39`7y%wvJ4~@lko2@6+Mr9&BHI)d4MKpSDH5B6DW<Un&58>~7s!gt`9T(C(I8dC
+zg}5SGWD~{2rMfz?l1$lg;B*6PLQ*$?ErSNQw&5;_&H2|dv!akzG{7whYgp>AxoU=F
+zX^NzyCbm-GZA!xJY6)*joMa~GbR61Bsse@c!x5z0Ni7`XtpU*>aZ7J8!__<vfMsKY
+ztELqLW(4N}MhLOQb{IbyCOM*LG0wYa@yyNZC$3Jsb@}Y~W5pLK^mn1(x#u*nXnt^T
+zwHj=?`OW#lPN(8$0?iAKgfh9kt1kdTT`M8fh-e3Wj}V)==VlRUBOn(FyPf%y1X&Oq
+t#L>5dsXgoGJv?)B>@)J&-d%K;)bG1AzT=34j%|Uz$L~4MSHC&){{^UbI9UJy
+
+literal 0
+HcmV?d00001
+
+diff --git a/server/test/fixtures/chapters/chapters.mp4 b/server/test/fixtures/chapters/chapters.mp4
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa1d3baa674a77c1a7c0bc4879dc0f5712720254
+GIT binary patch
+literal 2400
+zcmbVOPiS047@ti{h&5Hg1ain>)QBFE&3l_a*2sfhOKA#`3dMpTJm<}u-S^D<mwA(9
+zx2GT;^yIB*E3GF{5j+(=D2>pIc<4<G6|o3nDcED{!K}aU?QXJNs)%29=KKH6H#6Ti
+zd5ke$H?1tp)0nX#Mi`?awxk_ri#B6ytge+}Y`7Nt!myE3iP0&<<0_FpV<pCpoJrDc
+z?(ka|Kf6y3rq7BET^=22w=e#5;?_66?X7-!e)dPc_w*lknw8~6KF4LM6}Oj{K(3Y{
+znt%C~6DQ{udF||R=zJxiIG$#$NYxFmSk}T^#j22XU`)0$Kfk@bUET_Pl|~{dr@Apu
+zam#^;BiN*w3DYEB;Zk@)IyTp;?ksR$c~L6Y9ec%EvA9S?)XJ4(H5XQ_rfo0qSUG`e
+z@_f?+^*qn=7F;pA+IQ@-1t&~A4x7q%DWVMzSBs>f9DA9|K&P>A;c9cERTPCesAJ7z
+zzBC}@M(kKfLHOs=L^&0E*0y<F<i^eN^)MrgPJoTfP3!es8E3A-O`zdHfub~B7XcXe
+zP?krbL@qsn#S>kuA;VZ0$|FpS(vg4><X*I?Maz|GoCyP7;)skEVS*4a)Pij4TEr^H
+zVR>%W0v-BJ1+?%*M!WD_FBCZ~5^7cKYg>hlz<AK5nM&M7nnBwUW^i3sEyQ*zOIDY3
+z<1m3dmnu<m(>RM3WvK<7s8)FZZ!O(}-I88QN9sC{Jsd0T3XD@(C|i7k_TpIOWsn)g
+zEwE@h%P&BX8<jbWJj`%Ms0UmjVu=l0KV2r<LAg$<civ``?ftvo-P!&4_KlyfTz#X&
+z{)FP;+J%{@c6$GZU%-sjF1^%z>+;M^qDz;Asm(uE$V->xo1jVlSnYy3^+_%GU~TM~
+z_WqS`85_A9r|A|{QM?tPbNXTUcg7z1ikb<(L%5HDcz~}ST0V#xMnmu7B-f#Q-K-aD
+zLUsV%Xjpd;2G)7tx*Se47@JYP$$_U;l$%0QWJ+<Xy__d-RdwjbWgs%(A^c`yKNO&O
+z><^v?{Masg^%@XkbAcb}g2F^S-lGYhrJi3Ei61GlDP704(?SzlaS^nCD>HsaH|=+l
+zA%D`3Z|aD5=+b++@gmSybCdTjiEO^07ZI4CKW0b58E2~?X%Lhq*I>U~Dcg40#v2iZ
+z9=%5$Wid~++rUe(I$rYGk@ihC)d2o{?^N_q6|XHF-Ee96+Pi9}#72YLzkdJJ?qB!r
+zk?-S~$mt9z4H^^ZgYLPHfu+Hwa#P$1(PT5qkRf0K+oHQ7==oRWp)Kr4UhV2X>f#<x
+zEa`a{R|!uerX&K;i`k9CW}!RRQ57@fLtleBiZR|do&b&9B>iV0pg19HpB<=Q)Xf2O
+z>Hk^32VwrLeqltJu+rs!uGMbucH&w6wQ5we*AIpE%%*2T6REy(J=rbSwMM60ry39x
+z#?>80e_fa@VimdcM8E@lwWInEWzMd5%iJ9(^V5AfQ}lrqiUkg3N9#s-uqh;cWys!#
+zA&tQ@#PdVP^}v#$r-=gbfs!FPmB$puqZor_VnO!drf&rBYq2UYNcLp^Rp9!x$TI5e
+z1DFjv@72twCZ)QY#`g^cDRzVYt)qVzsC^-OQ3hF5D8Nug1sr?~VYlaZ?*9&AC3}vs
+FzX9Lj)z<(3
+
+literal 0
+HcmV?d00001
+
+diff --git a/server/test/fixtures/chapters/nero.mp4 b/server/test/fixtures/chapters/nero.mp4
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c44613b034c32aaaeaa731006d568d242ad543e
+GIT binary patch
+literal 2400
+zcmbVOO^6&t6t3AdVT~IV+=V^tq0|*U?96u0{uoypW(*;_5Qz{B2tr%kT{GQo|7~^6
+z?o3XLc+iu#powHXiHhJU=t0Q}xrm3{#1IjKAclZBCLY}Jd)+g$lOc-ulIr)~_g=kv
+zRrOx&FvfU8chVqBBF4rTag3_ia?L1RG8tnN4J9RG<MqfBnjKn?wMqa_%GmW7D=~KD
+zOq^_Ui{HBV*?l;aAul$zd-zbdd-10ex4!x9`r4Q0=YQnapZ?=cySlQ(%iK+r<mSpU
+z#I*{bg_mDBak9L`>t~O{=1CWZ<4M{HWkd6-VJw!bMwPsMt<%+oh3)O_%2wdXBouKa
+zQOyO4Tk&-i!Y4^}ki^+4cZDNd%j8NntVQlgCrsQ8%Um^94K894b~0%h?Zs82ZJLWb
+zl9n&qJZm|Sp66-S!Bl*0<ymIMz$AQl6ttyhQ$!OpY$f8Rw9FOm`YMTpjj1NrN`_&O
+zK|0nx=D8YzyBS#qQV`y`B$igyoHtG05Sg~qY$Hg?qX@8>+DW64No|#@T>A<$C{UOr
+z8^VWTA7EJ+xX7gs7(7<_8g38?O?d>dmMRo*0`7z@B|5g7M5)lwT^x~CB8U+Jj!KYE
+zLy1UcI4s9bJCFm<szMf?NNE?2?F1sDMFJ)BeQnF2>1zkJB$ct<Oj1}2FvZjj*+Fcp
+zx@`1BI|^dpnJZ)IwzRcmP?k#2i7J`-n5|rUuv@Y#*K$>ZM-Gmab_K<%E>;Y_Nqe!3
+z$_m7k;^thmt(6x5WLl=y5)V?`5$XX~h*)A1*H4$pc2KU<@}0NYba(&mcX#$azJ258
+z%U9kgu|HvWxPD<Ste@Wh;TI?q^-C|c-`btKNpk6u(DjAqa=diOeG@X_kJT^8^-t>l
+z2d5^U>F!_tma#*3qa@jaDU7y!bj~o1|IXMWUr{sR{{h{n03Ok62c8d-#?jDwILQqd
+zU)LM?n!pCsi-vVaX=I%TuFElr24i#5(;4`z3^Sc0d8QP%*3WqgSJi-RvUp7J(y+0)
+z$O{B89(kkZfq86?y?Palv9j-lDwpt~9`DP<&r;8?iP#Gz`IN5V+G(MwttbyVyp=hx
+zu+4f!GBls;lPwkULN2|RX(xnyCDU2|lE~)^dJ(~ihGP~8XPm7;q(M}gJ_Y}kYQ;1w
+zCf<lJaOgcMjQMw_+XY{S*YT3aj&yIbnI`z>*Vn^`YItqw=*COqSKpO8C3e`q{p<Hn
+z?frG{9?g9`6<G>SY0#KLAN0<B0xAtQlj;0UNG6}d3>ku^ur0bPqW=7vd*BN{!fQSI
+zM?K!xNhLe)@fz`2#B@mj^<(zpuzA?d6{h?PeC%sTM=>Uc#uJc{n@fLLh$v0~-)Bea
+z7j-kBp8P-ScM#^^>K9Iw2`laXbFKDzw}@v9*Q%E7em~^aGc894I+R1@da_rpr<z5%
+z&NKn!&b1vz|9Ui^$I5f*L*OHNtuXzEGH2I%Wp0m@`RSpYDf-9?`2q*n(S{Zdd~#%{
+z4B7i|q%m5Ccz)=(9#}H;G*KWvQZj^7dCXuuiZNOy2CxrXo)+M*MKb3Q*^|Rpf$LKu
+zO{ud7G#?c2)!e5#p}L#J?;8q|?*{$bK>sdM`vQB>_0upnK%tCs8vGc-ZqM)B|2v44
+I%rawt1O1BC-2eap
+
+literal 0
+HcmV?d00001
+
+diff --git a/server/test/fixtures/chapters/no-chapters.mp4 b/server/test/fixtures/chapters/no-chapters.mp4
+new file mode 100644
+index 0000000000000000000000000000000000000000..d3acbb3406dfaf0777fefedd6c2fadf01c6f04c8
+GIT binary patch
+literal 1713
+zcmZuyO=u)V6s}1$jJl#=0y*SR>Ifc^Nq0{&u7QRb!(tXz^x}dbwAJ0!>2~@rRh49B
+zPpf#)lQ+Q?vYtd?!PBA#Wh3lGJa`j>A})d`3+~bNV8-wD%xuQ6kEwcJy`QgsUR4ic
+zj7MfrCc4NNn_;BU9I+SJS-EC2#_ExhlCjx(77Bxyt8)(yhadfX?$57(Kic}@gXJIj
+z(bIq3={xN;zQTh-Np82-0k@hkt-kcixffT~c=zHae4z~B*euFHDkH-k%WADSmP668
+zG3CbU>i+(Ib1w;Hk&3)osO?qaZN?@`5mS^VDRRBR1L2FnwYid!+v1`0(<11(_J*}#
+zagmF3prvc|TN_s2wp%=tZY=v;@A^Q`@lp?vir!P9Yd0+<q2pQ7m!U_DHZnXV@@?tb
+zZ63s`$b^Sfn;Rw5G|@n3`)9+z00cXkYhei@yj0}Ub?jx^=8@3GD|Ig^DPlyhQ+h=d
+zX=&UQhnrX-gNV|i=!qBu@5H9lB*0oG28-vanj=UuVQ3vmZlp>Df?)U4T_pxyP-LYr
+z7za2aqePN}0)a|UOr%66H4e-7$^mc^x(=`iMM=BxJwFkeCP|d6_O&mQ?b!J66{XC*
+z?V^NtWGs=|lLK(O&bl>*UY6vr>p<o**fs8&MXOYTPE<)9BU=UDz1@;u1#X}sp7}Ud
+z+7$+_(`s6LhxX!H%{E|3yp<MxxBWZ}+Q`yf<4K7c;Xa^*;1WA1KNXW*#+6-=@4mwp
+zhR1(@d*|?z+duts{l*(L_75Bnb+0ti?#stN{E9)nd+<X4?W>Jjglh-FbXT9P?6rg7
+zO<=M=*1aOnf7*>dyik8;czpdEyo0y0qS%8g&GzCDdP-*hVC<1ES&h-}ME*B``P8^`
+z5_vx~gEw~#C)tDZb<?ZnoSh0Bvti!Ta%!IY&dZTRjj@IdjfP&5sm4361PsL68LxS!
+zk%ftXhiBpGy(5MlvR7|HF}4zisj3h<de0L~`XasWEs=+*q?p?GC~*WZzn4{{)5~sz
+zBi~Ypdql|)@}JpNDIek5``Y*^@C|MBq#zXYIeo;SNv1hR7S1@^0;EP#TeyJuw$rrj
+zrj74Gn)vkX89A$daX5rtN7QC5WDgH-vBhoZYe(nP2RgVIbWF3g*_-dl%QZF^-~R2p
+zrw;$UdzW$_FNH3lX&Kb!ap%WpT*t7IMQy6{rvb&xF{}_Wk8M$1NGAE6;3O7tWbcgq
+zACL89OhfYXvF?yw0%t$~GT|Kaux0ozja*d^`^;BBkD{HKYEJ-TZ9xG|LOd3l*bR+<
+uel3%g24qi8-v`_wCCZXYc2Aa*(WPsAW(p!)!ha2s5Gg}pA{3@Yb@>l+F@N6x
+
+literal 0
+HcmV?d00001
+
+diff --git a/server/test/fixtures/chapters/quicktime.mov b/server/test/fixtures/chapters/quicktime.mov
+new file mode 100644
+index 0000000000000000000000000000000000000000..25aab1fe08ba27e103b5207c226d7e4aeb108d76
+GIT binary patch
+literal 2312
+zcmb_d&2Jk;6dxy~3T;Y}NTeKc7(tLYB+jn$K?$s|2`!08MWu?KK+Ejz*t>YYGCPUw
+zav(w+;2%Juky1_wDA%e;fCy4Ah&yToLR3gVRf!%c2V#D2Z6~P}I3Qj;`@VnkX6DU=
+zF*aJ&t#nOu&e#C!a5mfsJjvK#CGv!3Lo2aX31e(T#;(U$fwAKk;-tYXetYYa`|MB-
+zMX`Y^$A;SNtsl<Z{_>aI<?HWF-Q>HE{eHJuTA1V0+)b3^=E6M0<swWo=gyybVS0{N
+zE-u06Nf(Z#ByEMVs(HyUW~WO=iK2b2)5V#YMx#;OK%q$};$os|GlX08brd2dNp+CK
+z*&=s^BV5bmN>;5|?nx(1+`45h8jA)Ou?Sn4w2bELqR}+XSsqEtmrb6nJCL5_Y1Tq2
+zzP9o#vuGd*A07ow>Dh#6BEwc9u1U*W;I6NdNZ3d<xmGd^gACH?=4sE>5ZtxMGEjo>
+zE+w(FO6HVl@~X(Roo4kQrHBr|T52cNY9_TcUE<nT$RMCFN$SFfVjtMDFmO>z&tULa
+z<#V_}BsA3##9FFQAP9CRTvwuHyGfJ^4c)~SX(fUf5C~L)Vya3+GQ(y$cG`j*cvcCr
+z@I*?haBL?K8BG!>nXjuMgPN}$_>xq{b}dQa?HE&})@2LWR%zboigpyluxGA}rMs@J
+zIfJTHf_7BN%ty9z?fun~U%8g6syuSAt+XmAR%y0q@HJYCWfT`6ri7bw(X<wxf+5o~
+zwdQz`;*8J_I6`2FH5@-3Cfh{2j>&i4W@GKWKfbxU^WmNEf4uh9YX$Zv91m75PllD3
+z_P+ZG%5Y`-x#n9}CU22k*cQ4n^F(ehY`d>RCi|(%Wx4WE#eaWw`0@7MwXYc)x*8?P
+z23%pZ;p65UrorDBJMkG^Cj1WQJ_Y7Jy?hXPlr)G-d=ooahw~L(&*y|~pSoz6x1ajv
+zIdWc(BpQrON>69t6Ee(nZpkYp+;XqxQ5;njz7f|KDfj?>&qQ7zAoIxU-w))m9rk7$
+zjIn9o3l#~GA1b=zB=>0KB3=4r5qqITP~le`J54mY5#^wVmon7@@&L51Lf!)*e&Ttd
+z#Xb(3^g1{bUZ-#hA*_*Z9^}FsnRY_hu4X#x9Vo?Yi4E5TC(7qPd-mM<e9g3Oj=yDi
+zXb=^~RuR8YDw<}|#CsA34!vC+XZ{^;(?-lAYN_C{<Lz5)yaxX1?n?MT880(!^I&1{
+z#=CN}z>fKMe*X5+oxkqgquhs6k<orr88pT-ou3uNTtCK84QLcgpfe=u#g^TJSj3UN
+z-1UFZ<vpEL^7Ae)6Q2O4O9H5e*~MW~@LlS-@-OTIUqCvEF>+`;0vWZr^dE<aa9&01
+zvweMyech+7{2%*zALifs8bMSED_sBQ9`4@h4xZ6#J?ddCo4tFIdrw_hcXXgbx!-;T
+zdKIg1uGTtjJYIt#4=!)wrP|Cze5P`&yq2B`yiYH8T>o?Xv(LNj|6*VJKYeI@R7qbo
+zc`*mJlT|Go#N?L#_QZ2V+jwLv(NjiAyswqWPHi)e@eoFT`%J>d*F7yL=HslP*vQK_
+Na0RQlg0pl3{|0dK&RGBe
+
+literal 0
+HcmV?d00001
+
+diff --git a/web/src/lib/components/asset-viewer/VideoChapterMenu.spec.ts b/web/src/lib/components/asset-viewer/VideoChapterMenu.spec.ts
+new file mode 100644
+index 000000000..5af15941d
+--- /dev/null
++++ b/web/src/lib/components/asset-viewer/VideoChapterMenu.spec.ts
+@@ -0,0 +1,46 @@
++import VideoChapterMenu from '#lib/components/asset-viewer/VideoChapterMenu.svelte';
++import 'hls-video-element';
++import { render } from 'vitest-browser-svelte';
++import { page } from 'vitest/browser';
++
++const chapters = [
++  { startTime: 0, endTime: 1.25, title: 'Intro' },
++  { startTime: 1.25, endTime: 3, title: 'Snow = 雪' },
++  { startTime: 3, endTime: 4, title: null },
++];
++
++describe('VideoChapterMenu', () => {
++  it.each(['video', 'hls-video'])('seeks %s playback to a chapter without replacing the source', async (tag) => {
++    const player = document.createElement(tag) as HTMLVideoElement;
++    await render(VideoChapterMenu, { chapters, player, ready: true, currentTime: 0 });
++    await page.getByTitle('video_chapters', { exact: true }).click();
++    await page.getByRole('button', { name: '0:01 Snow = 雪' }).click();
++    expect(player.currentTime).toBe(1.25);
++    expect(player.getAttribute('src')).toBeNull();
++    await expect.element(page.getByTitle('video_chapters', { exact: true })).toHaveFocus();
++  });
++
++  it('hides chapter controls when no chapters exist', async () => {
++    await render(VideoChapterMenu, { chapters: [], player: undefined, ready: false, currentTime: 0 });
++    await expect.element(page.getByTitle('video_chapters', { exact: true })).not.toBeInTheDocument();
++  });
++
++  it('disables seeking until media metadata is loaded', async () => {
++    await render(VideoChapterMenu, { chapters, player: undefined, ready: false, currentTime: 0 });
++    await page.getByTitle('video_chapters', { exact: true }).click();
++    await expect.element(page.getByRole('button', { name: '0:00 Intro' })).toBeDisabled();
++  });
++
++  it('marks the current chapter, provides missing titles and renders embedded markup as text', async () => {
++    const { baseElement } = await render(VideoChapterMenu, {
++      chapters: [...chapters, { startTime: 4, endTime: 5, title: '<img src=x onerror=alert(1)>' }],
++      player: undefined,
++      ready: true,
++      currentTime: 1.5,
++    });
++    await page.getByTitle('video_chapters', { exact: true }).click();
++    await expect.element(page.getByRole('button', { name: '0:01 Snow = 雪' })).toHaveAttribute('aria-current', 'true');
++    await expect.element(page.getByRole('button', { name: /0:03 video_chapter/ })).toBeVisible();
++    expect(baseElement.querySelector('img')).toBeNull();
++  });
++});
+diff --git a/web/src/lib/components/asset-viewer/VideoChapterMenu.svelte b/web/src/lib/components/asset-viewer/VideoChapterMenu.svelte
+new file mode 100644
+index 000000000..27be749cc
+--- /dev/null
++++ b/web/src/lib/components/asset-viewer/VideoChapterMenu.svelte
+@@ -0,0 +1,66 @@
++<script lang="ts">
++  import type { AssetChapterResponseDto } from '@immich/sdk';
++  import { Icon } from '@immich/ui';
++  import { mdiFormatListNumbered } from '@mdi/js';
++  import { Duration } from 'luxon';
++  import { t } from 'svelte-i18n';
++
++  interface Props {
++    chapters: AssetChapterResponseDto[];
++    player: Pick<HTMLMediaElement, 'currentTime'> | undefined;
++    ready: boolean;
++    currentTime: number;
++  }
++
++  let { chapters, player, ready, currentTime }: Props = $props();
++  let menu: HTMLDetailsElement | undefined = $state();
++  const activeIndex = $derived(
++    chapters.findLastIndex((chapter) => currentTime >= chapter.startTime && currentTime < chapter.endTime),
++  );
++
++  const seek = (startTime: number) => {
++    if (player && ready) {
++      player.currentTime = startTime;
++      if (menu) {
++        menu.open = false;
++        menu.querySelector('summary')?.focus();
++      }
++    }
++  };
++
++  const timestamp = (seconds: number) =>
++    Duration.fromObject({ seconds: Math.floor(seconds) }).toFormat(seconds >= 3600 ? 'h:mm:ss' : 'm:ss');
++</script>
++
++{#if chapters.length > 0}
++  <details bind:this={menu} class="relative shrink-0">
++    <summary
++      class="cursor-pointer list-none rounded-full p-2"
++      aria-label={$t('video_chapters')}
++      title={$t('video_chapters')}
++    >
++      <Icon icon={mdiFormatListNumbered} />
++    </summary>
++    <ol
++      aria-label={$t('video_chapters')}
++      class="absolute right-0 bottom-12 z-10 max-h-64 w-72 max-w-[80vw] overflow-y-auto rounded-xl bg-light-100 p-2 leading-normal text-dark shadow-sm"
++    >
++      {#each chapters as chapter, index (chapter.startTime)}
++        <li>
++          <button
++            type="button"
++            class="flex min-h-10 w-full gap-3 rounded-lg p-2 text-left hover:bg-light-200 focus-visible:bg-light-200 aria-current:bg-light-200"
++            disabled={!ready}
++            aria-current={index === activeIndex ? 'true' : undefined}
++            onclick={() => seek(chapter.startTime)}
++          >
++            <span class="shrink-0 tabular-nums">{timestamp(chapter.startTime)}</span>
++            <span class="min-w-0 wrap-anywhere"
++              >{chapter.title || $t('video_chapter', { values: { number: index + 1 } })}</span
++            >
++          </button>
++        </li>
++      {/each}
++    </ol>
++  </details>
++{/if}
+diff --git a/web/src/lib/components/asset-viewer/VideoTimeline.spec.ts b/web/src/lib/components/asset-viewer/VideoTimeline.spec.ts
+new file mode 100644
+index 000000000..6dcf52c99
+--- /dev/null
++++ b/web/src/lib/components/asset-viewer/VideoTimeline.spec.ts
+@@ -0,0 +1,28 @@
++import VideoTimeline from '#lib/components/asset-viewer/VideoTimeline.svelte';
++import { render } from 'vitest-browser-svelte';
++
++describe('VideoTimeline', () => {
++  const chapters = [
++    { startTime: 0, endTime: 5, title: 'Intro' },
++    { startTime: 5, endTime: 10, title: 'End' },
++  ];
++
++  it('places chapter markers on the playback timeline', async () => {
++    const { baseElement } = await render(VideoTimeline, { chapters, duration: 10 });
++    const markers = baseElement.querySelectorAll(':scope [aria-hidden] span');
++    expect(markers).toHaveLength(1);
++    expect((markers[0] as HTMLElement).style.left).toBe('50%');
++    expect(baseElement.querySelector('immich-time-range')).not.toBeNull();
++  });
++
++  it.each([0, NaN, Infinity])('omits markers when duration is unavailable: %s', async (duration) => {
++    const { baseElement } = await render(VideoTimeline, { chapters, duration });
++    expect(baseElement.querySelector('[aria-hidden]')).toBeNull();
++  });
++
++  it('shows the normal seek bar for videos without chapters', async () => {
++    const { baseElement } = await render(VideoTimeline, { chapters: [], duration: 10 });
++    expect(baseElement.querySelectorAll(':scope [aria-hidden] span')).toHaveLength(0);
++    expect(baseElement.querySelector('immich-time-range')).not.toBeNull();
++  });
++});
+diff --git a/web/src/lib/components/asset-viewer/VideoTimeline.svelte b/web/src/lib/components/asset-viewer/VideoTimeline.svelte
+new file mode 100644
+index 000000000..a593cad98
+--- /dev/null
++++ b/web/src/lib/components/asset-viewer/VideoTimeline.svelte
+@@ -0,0 +1,20 @@
++<script lang="ts">
++  import type { AssetChapterResponseDto } from '@immich/sdk';
++  import './immich-time-range';
++
++  let { chapters, duration }: { chapters: AssetChapterResponseDto[]; duration: number } = $props();
++</script>
++
++<div class="relative h-8 w-full px-2 pb-3">
++  <immich-time-range class="size-full rounded-lg outline-none"></immich-time-range>
++  {#if Number.isFinite(duration) && duration > 0}
++    <div aria-hidden="true" class="pointer-events-none absolute inset-x-2 top-0 h-5">
++      {#each chapters as chapter (chapter.startTime)}
++        {#if chapter.startTime > 0 && chapter.startTime < duration}
++          <span class="absolute top-1.5 h-2 w-0.5 bg-dark/80" style:left={`${(chapter.startTime / duration) * 100}%`}
++          ></span>
++        {/if}
++      {/each}
++    </div>
++  {/if}
++</div>
+diff --git a/web/src/lib/queries/asset.query.spec.ts b/web/src/lib/queries/asset.query.spec.ts
+new file mode 100644
+index 000000000..bd421ffe8
+--- /dev/null
++++ b/web/src/lib/queries/asset.query.spec.ts
+@@ -0,0 +1,25 @@
++import { getAssetChaptersQuery } from '#lib/queries/asset.query.ts';
++import { queryClient } from '#lib/queries/client.ts';
++import { test } from '#test/unit/fixtures.ts';
++import { setPage } from '#test/unit/mocks/app-state.svelte.ts';
++
++test('loads chapters for an authenticated asset', async ({ api }) => {
++  const chapters = [{ startTime: 0, endTime: 5, title: 'Intro' }];
++  api.on({ getAssetChapters: () => ({ json: chapters }) });
++  await expect(queryClient.query(getAssetChaptersQuery('asset-1', null))).resolves.toEqual(chapters);
++  expect(api.getAssetChapters).toHaveBeenCalledWith({ params: { id: 'asset-1' } });
++});
++
++test('includes the shared-link key in chapter requests and cache keys', async ({ api }) => {
++  setPage({ route: { id: '/(user)/share/[key]/[[photos=photos]]/[[assetId=id]]' }, params: { key: 'share-key' } });
++  const options = getAssetChaptersQuery('asset-1', 'version-1');
++  await expect(queryClient.query(options)).resolves.toEqual([]);
++  expect(api.getAssetChapters).toHaveBeenCalledWith({ params: { id: 'asset-1', key: 'share-key' } });
++  expect(options.queryKey).toContainEqual({ key: 'share-key', slug: undefined });
++});
++
++test('refetches chapter metadata after the asset cache key changes', async ({ api }) => {
++  await queryClient.query(getAssetChaptersQuery('asset-1', 'version-1'));
++  await queryClient.query(getAssetChaptersQuery('asset-1', 'version-2'));
++  expect(api.getAssetChapters.calls).toHaveLength(2);
++});
+diff --git a/web/src/lib/queries/asset.query.ts b/web/src/lib/queries/asset.query.ts
+new file mode 100644
+index 000000000..37cfa00a5
+--- /dev/null
++++ b/web/src/lib/queries/asset.query.ts
+@@ -0,0 +1,11 @@
++import { authManager } from '#lib/managers/auth-manager.svelte.ts';
++import { getAssetChapters } from '@immich/sdk';
++import { queryOptions } from '@tanstack/svelte-query';
++
++export const assetChaptersQueryKey = ['asset-chapters'];
++
++export const getAssetChaptersQuery = (id: string, cacheKey: string | null) =>
++  queryOptions({
++    queryKey: [...assetChaptersQueryKey, id, cacheKey, authManager.params],
++    queryFn: ({ signal }) => getAssetChapters({ id, ...authManager.params }, { signal }),
++  });
+diff --git a/web/test/medium/specs/asset-viewer/chapters.spec.ts b/web/test/medium/specs/asset-viewer/chapters.spec.ts
+new file mode 100644
+index 000000000..524b39139
+--- /dev/null
++++ b/web/test/medium/specs/asset-viewer/chapters.spec.ts
+@@ -0,0 +1,98 @@
++import { Route } from '#lib/route.ts';
++import { factory } from '#test/common/factories.ts';
++import { expect, test } from '#test/medium/fixtures.ts';
++import { AssetTypeEnum, SharedLinkType } from '@immich/sdk';
++import { readFileSync } from 'node:fs';
++
++const videoData = new Uint8Array(
++  readFileSync(new URL('../../../../../server/test/fixtures/chapters/no-chapters.mp4', import.meta.url)),
++);
++const videoResponse = {
++  status: 206,
++  body: videoData,
++  contentType: 'video/mp4',
++  headers: {
++    'Accept-Ranges': 'bytes',
++    'Content-Range': `bytes 0-${videoData.length - 1}/${videoData.length}`,
++  },
++};
++const chapters = [
++  { startTime: 0, endTime: 1, title: 'Intro' },
++  { startTime: 1, endTime: 2, title: 'Snow = 雪' },
++  { startTime: 2, endTime: 3, title: null },
++];
++
++test.afterEach(async ({ page }) => {
++  await page.evaluate(() => {
++    localStorage.removeItem('always-load-original-video');
++    localStorage.removeItem('auto-play-video');
++  });
++});
++
++for (const playback of ['original', 'transcoded', 'shared-link']) {
++  test(`seeks embedded chapters during ${playback} playback`, async ({ page, context, data, api }) => {
++    data.publicConfig.ffmpeg.realtime.enabled = false;
++    const asset = factory.asset({
++      type: AssetTypeEnum.Video,
++      originalFileName: 'chapters.mp4',
++      originalMimeType: 'video/mp4',
++      duration: 3000,
++      width: 32,
++      height: 32,
++    });
++    data.addAssets(asset);
++    api.on({
++      getAssetChapters: () => ({ json: chapters }),
++      playAssetVideo: () => videoResponse,
++      downloadAsset: () => videoResponse,
++    });
++
++    await page.goto(Route.photos());
++    await page.evaluate((original) => {
++      localStorage.setItem('always-load-original-video', JSON.stringify(original));
++      localStorage.setItem('auto-play-video', 'false');
++    }, playback === 'original');
++
++    let sharedKey: string | undefined;
++    if (playback === 'shared-link') {
++      const link = factory.sharedLink({
++        type: SharedLinkType.Individual,
++        assets: [asset],
++        showExif: false,
++        allowDownload: false,
++      });
++      data.addSharedLinks(link);
++      sharedKey = link.key;
++      await context.clearCookies();
++      await page.goto(Route.viewSharedLink(link));
++    } else {
++      await page.goto(Route.viewAsset(asset));
++    }
++
++    const video = page.locator('media-controller video[slot="media"]');
++    await expect
++      .poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState))
++      .toBeGreaterThanOrEqual(1);
++    const source = await video.getAttribute('src');
++    expect(source).toContain(playback === 'original' ? '/original' : '/video/playback');
++    await page.getByTitle('video_chapters', { exact: true }).click();
++    const chapter = page.getByRole('button', { name: '0:01 Snow = 雪' });
++    await expect(chapter).toBeEnabled();
++    expect((await chapter.boundingBox())!.height).toBeGreaterThanOrEqual(40);
++    await chapter.click();
++    await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeCloseTo(1, 2);
++    await expect(video).toHaveAttribute('src', source!);
++    await expect(page.locator('immich-time-range').locator('..').locator('[aria-hidden] > span')).toHaveCount(2);
++    if (playback === 'transcoded') {
++      await page.getByTitle('video_chapters', { exact: true }).focus();
++      await page.keyboard.press('Enter');
++      await page.keyboard.press('Tab');
++      await page.keyboard.press('Enter');
++      await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBe(0);
++      await expect(video).toHaveJSProperty('paused', true);
++    }
++    expect(api.getAssetChapters).toHaveBeenCalledWith({
++      params: expect.objectContaining({ id: asset.id, ...(sharedKey && { key: sharedKey }) }),
++    });
++  });
++}
