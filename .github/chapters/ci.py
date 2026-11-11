@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -130,6 +131,23 @@ def verify(source, plan):
         subprocess.run(command, cwd=source, check=True)
 
 
+def wait_for_build_retry(attempt):
+    if attempt not in (1, 2):
+        raise ValueError("Only two build retries are allowed")
+    record = json.loads(run(["docker", "buildx", "history", "inspect", "--format", "json"]))
+    error = record.get("Error") if isinstance(record, dict) else None
+    message = error.get("Message", "") if isinstance(error, dict) else ""
+    if (
+        not isinstance(record, dict) or record.get("Status") != "failed"
+        or not isinstance(message, str)
+        or not re.search(r"https://ghcr\.io/v2/\S+[^\n]*(?:\b429\b|too many requests|toomanyrequests)", message, re.IGNORECASE)
+    ):
+        raise RuntimeError("Build did not fail with a GHCR rate limit; refusing automatic retry")
+    delay = 60 * attempt
+    print(f"GHCR rate limit: waiting {delay}s before build attempt {attempt + 1}/3", flush=True)
+    time.sleep(delay)
+
+
 def main():
     command = sys.argv[1]
     if command == "resolve":
@@ -143,6 +161,8 @@ def main():
         plan = json.loads(Path("chapters-build.json").read_text())
         function = apply if command == "apply" else verify
         function(Path(sys.argv[2]), plan)
+    elif command == "wait-for-build-retry":
+        wait_for_build_retry(int(sys.argv[2]))
     else:
         raise ValueError(f"Unknown command: {command}")
 

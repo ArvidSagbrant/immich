@@ -132,12 +132,15 @@ jobs:
           buildkitd-config-inline: |
             [worker.oci]
               max-parallelism = 1
+            [system]
+              maxRegistryConcurrency = 1
 
       - name: Build the server image including the web client
         id: image
         if: steps.existing.outputs.found != 'true'
+        continue-on-error: true
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
-        with:
+        with: &image-build
           context: source
           file: source/server/Dockerfile
           platforms: linux/amd64
@@ -158,10 +161,31 @@ jobs:
           cache-from: type=gha,scope=immich-chapters-amd64
           cache-to: type=gha,mode=max,scope=immich-chapters-amd64
 
+      - name: Wait before retrying a GHCR rate limit
+        if: steps.image.outcome == 'failure'
+        run: python3 automation/.github/chapters/ci.py wait-for-build-retry 1
+
+      - name: Retry the image build after a GHCR rate limit
+        id: image_retry
+        if: steps.image.outcome == 'failure'
+        continue-on-error: true
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with: *image-build
+
+      - name: Wait before the final GHCR rate limit retry
+        if: steps.image_retry.outcome == 'failure'
+        run: python3 automation/.github/chapters/ci.py wait-for-build-retry 2
+
+      - name: Retry the image build for the final time
+        id: image_retry_final
+        if: steps.image_retry.outcome == 'failure'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with: *image-build
+
       - name: Record the resulting image
         if: success()
         env:
-          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.image_retry_final.outputs.digest || steps.image_retry.outputs.digest || steps.image.outputs.digest }}
           ALREADY_BUILT: ${{ steps.existing.outputs.found }}
           PUBLISH: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
         run: |

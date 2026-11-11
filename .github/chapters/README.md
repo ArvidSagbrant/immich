@@ -49,6 +49,8 @@ Every successful build saves `chapters-build.json` as an Actions artifact, conta
 
 Builds run on GitHub-hosted Ubuntu, not on the workstation. Verification uses one worker at a time. BuildKit uses one parallel build operation with a 4 GB container memory limit and a 6 GB combined memory/swap limit. Registry build caching is scoped to this image.
 
+BuildKit also limits concurrent registry connections to one. If an image build fails with a GHCR HTTP 429 rate limit, the workflow inspects the latest Buildx history record and retries on the same builder after 60 seconds, then 120 seconds. Cached work is reused; feature tests are not repeated. There are at most three build attempts. Other build failures, missing history, and exhausted retries fail the job and prevent recording the image as successfully built. Each attempt uses the same image tags, platform, cache and publication settings.
+
 The recipe resolves and applies both patches using Python's standard library and Git. Its small unit tests cover release/profile selection, immutable tagging, serial verification commands, and conflict handling without partial writes.
 
 ```sh

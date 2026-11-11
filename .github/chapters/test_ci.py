@@ -1,3 +1,4 @@
+import json
 import subprocess
 import tempfile
 import unittest
@@ -16,6 +17,67 @@ class ChapterPipelineTests(unittest.TestCase):
         for value in ["main", "v3.4.0-rc.0", "v4.0.0", "v3.3.6\nextra", "v3.3.6; true"]:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 ci.profile_for(value)
+
+    @patch("ci.time.sleep")
+    @patch("ci.run")
+    def test_retries_ghcr_blob_rate_limits_with_increasing_delays(self, run, sleep):
+        run.return_value = json.dumps({
+            "Status": "failed",
+            "Error": {"Message": "failed to copy: httpReadSeeker: failed open: unexpected status from GET request to "
+                      "https://ghcr.io/v2/immich-app/base-server-dev/blobs/sha256:abc: 429 Too Many Requests"},
+        })
+        ci.wait_for_build_retry(1)
+        ci.wait_for_build_retry(2)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [60, 120])
+        run.assert_called_with(["docker", "buildx", "history", "inspect", "--format", "json"])
+
+    @patch("ci.time.sleep")
+    @patch("ci.run")
+    def test_permanent_build_failures_and_other_services_are_not_retried(self, run, sleep):
+        for message in [
+            "process pnpm build did not complete successfully: exit code: 1",
+            "unexpected status from GET request to https://ghcr.io/v2/example/image/blobs/sha256:abc: 403 Forbidden",
+            "unexpected status from GET request to https://registry.npmjs.org/package: 429 Too Many Requests",
+            "process echo 429 did not complete successfully",
+        ]:
+            run.return_value = json.dumps({"Status": "failed", "Error": {"Message": message}})
+            with self.subTest(message=message), self.assertRaisesRegex(RuntimeError, "refusing automatic retry"):
+                ci.wait_for_build_retry(1)
+        sleep.assert_not_called()
+
+    @patch("ci.time.sleep")
+    @patch("ci.run")
+    def test_missing_or_nonfailed_build_records_are_not_retried(self, run, sleep):
+        rate_limit = {"Message": "https://ghcr.io/v2/example/image/blobs/sha256:abc: 429 Too Many Requests"}
+        for record in [None, [], {}, {"Status": "failed", "Error": None},
+                       {"Status": "failed", "Error": {"Message": None}},
+                       {"Status": "canceled", "Error": rate_limit},
+                       {"Status": "completed", "Error": rate_limit}]:
+            run.return_value = json.dumps(record)
+            with self.subTest(record=record), self.assertRaises(RuntimeError):
+                ci.wait_for_build_retry(1)
+        sleep.assert_not_called()
+
+    @patch("ci.time.sleep")
+    @patch("ci.run")
+    def test_history_inspection_failures_do_not_trigger_retries(self, run, sleep):
+        run.side_effect = subprocess.CalledProcessError(1, "docker")
+        with self.assertRaises(subprocess.CalledProcessError):
+            ci.wait_for_build_retry(1)
+        run.side_effect = None
+        run.return_value = "invalid JSON"
+        with self.assertRaises(json.JSONDecodeError):
+            ci.wait_for_build_retry(1)
+        sleep.assert_not_called()
+
+    @patch("ci.time.sleep")
+    @patch("ci.run")
+    def test_retry_budget_cannot_be_exceeded(self, run, sleep):
+        for attempt in [0, 3]:
+            with self.subTest(attempt=attempt), self.assertRaises(ValueError):
+                ci.wait_for_build_retry(attempt)
+        run.assert_not_called()
+        sleep.assert_not_called()
 
     @patch("ci.github")
     def test_resolves_only_published_stable_releases(self, github):
