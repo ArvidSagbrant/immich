@@ -16,15 +16,18 @@ index d598a48b8328e24d218d66eb2efe0a40c4d62b3f..a6b7ece6f60237736924dd9286090154
    "videos_count": "{count, plural, one {# Video} other {# Videos}}",
    "view": "View",
 diff --git a/packages/sdk/src/index.ts b/packages/sdk/src/index.ts
-index 779376a4fd6836ad3e54f44aeacccf019f9184da..46baeda962e7db0ea08148b41f515b079a6ce0f4 100644
+index 779376a4fd6836ad3e54f44aeacccf019f9184da..e4ed4cb713f21125002d54f30a392a3eebb09b33 100644
 --- a/packages/sdk/src/index.ts
 +++ b/packages/sdk/src/index.ts
-@@ -87,6 +87,9 @@ export const getAssetThumbnailPath = (id: string) => `/assets/${id}/thumbnail`;
+@@ -87,6 +87,12 @@ export const getAssetThumbnailPath = (id: string) => `/assets/${id}/thumbnail`;
  export const getAssetPlaybackPath = (id: string) =>
    `/assets/${id}/video/playback`;
  
 +export const getAssetVideoPreviewPath = (id: string) =>
 +  `/assets/${id}/video/preview`;
++
++export const getAssetVideoPreviewSheetPath = (id: string) =>
++  `/assets/${id}/video/preview-sheet`;
 +
  export const getUserProfileImagePath = (userId: string) =>
    `/users/${userId}/profile-image`;
@@ -42,7 +45,7 @@ index a0b19d75414fc2f1382d5ae95c500b3fd82a0467..af344f7506ebadad44bc11f8b9d09757
  
  export type CodecLevel = { maxFrame: number; maxRate: number; token: string };
 diff --git a/server/src/controllers/asset-media.controller.spec.ts b/server/src/controllers/asset-media.controller.spec.ts
-index 8c6304d22facdf5ec3b584bbcffe494c3b6984e4..25602a6734a30b93ab6245034a5a317a87cdf43e 100644
+index 8c6304d22facdf5ec3b584bbcffe494c3b6984e4..adf456c753c085115aa100a12fcf7f32d4e02c1b 100644
 --- a/server/src/controllers/asset-media.controller.spec.ts
 +++ b/server/src/controllers/asset-media.controller.spec.ts
 @@ -1,9 +1,10 @@
@@ -57,7 +60,7 @@ index 8c6304d22facdf5ec3b584bbcffe494c3b6984e4..25602a6734a30b93ab6245034a5a317a
  import { factory } from 'test/small.factory.js';
  import { ControllerContext, automock, controllerSetup, mockBaseService } from 'test/utils.js';
  
-@@ -43,6 +44,36 @@ describe(AssetMediaController.name, () => {
+@@ -43,6 +44,48 @@ describe(AssetMediaController.name, () => {
      ctx.reset();
    });
  
@@ -91,11 +94,23 @@ index 8c6304d22facdf5ec3b584bbcffe494c3b6984e4..25602a6734a30b93ab6245034a5a317a
 +    });
 +  });
 +
++  it('returns a non-cacheable pending response for a video preview sheet', async () => {
++    const id = factory.uuid();
++    ctx.authenticate.mockResolvedValue(authStub.adminSharedLink);
++    service.getVideoPreviewSheet.mockResolvedValue(undefined);
++
++    const { status, headers } = await request(ctx.getHttpServer()).get(`/assets/${id}/video/preview-sheet?key=secret`);
++
++    expect(status).toBe(204);
++    expect(headers['cache-control']).toBe('private, no-store');
++    expect(service.getVideoPreviewSheet).toHaveBeenCalledWith(authStub.adminSharedLink, id);
++  });
++
    describe('POST /assets', () => {
      it('should accept metadata', async () => {
        const mobileMetadata = { key: AssetMetadataKey.MobileApp, value: { iCloudId: '123' } };
 diff --git a/server/src/controllers/asset-media.controller.ts b/server/src/controllers/asset-media.controller.ts
-index 1646c867e3eb3e559ef0f9d041ce0111f683e039..911987802550c09a6f2b46dd420da033556dcbf0 100644
+index 1646c867e3eb3e559ef0f9d041ce0111f683e039..82bde0ec5d14c62b7ef83f7f0f659c2b84b0c8a3 100644
 --- a/server/src/controllers/asset-media.controller.ts
 +++ b/server/src/controllers/asset-media.controller.ts
 @@ -2,6 +2,7 @@ import {
@@ -106,7 +121,7 @@ index 1646c867e3eb3e559ef0f9d041ce0111f683e039..911987802550c09a6f2b46dd420da033
    HttpCode,
    HttpStatus,
    Next,
-@@ -11,6 +12,7 @@ import {
+@@ -11,10 +12,11 @@ import {
    Query,
    Req,
    Res,
@@ -114,6 +129,11 @@ index 1646c867e3eb3e559ef0f9d041ce0111f683e039..911987802550c09a6f2b46dd420da033
    UploadedFiles,
    UseInterceptors,
  } from '@nestjs/common';
+-import { ApiBody, ApiConsumes, ApiHeader, ApiResponse, ApiTags } from '@nestjs/swagger';
++import { ApiBody, ApiConsumes, ApiHeader, ApiNoContentResponse, ApiResponse, ApiTags } from '@nestjs/swagger';
+ import { type NextFunction, type Request, type Response } from 'express';
+ import { Endpoint, HistoryBuilder } from 'src/decorators.js';
+ import {
 @@ -27,6 +29,7 @@ import {
    AssetMediaCreateDto,
    AssetMediaOptionsDto,
@@ -122,7 +142,7 @@ index 1646c867e3eb3e559ef0f9d041ce0111f683e039..911987802550c09a6f2b46dd420da033
  } from 'src/dtos/asset-media.dto.js';
  import { AssetDownloadOriginalDto } from 'src/dtos/asset.dto.js';
  import { type AuthDto } from 'src/dtos/auth.dto.js';
-@@ -177,6 +180,23 @@ export class AssetMediaController {
+@@ -177,6 +180,48 @@ export class AssetMediaController {
      await sendFile(res, next, () => this.service.playbackVideo(auth, id), this.logger);
    }
  
@@ -141,6 +161,31 @@ index 1646c867e3eb3e559ef0f9d041ce0111f683e039..911987802550c09a6f2b46dd420da033
 +    @Query() { time }: VideoPreviewOptionsDto,
 +  ): Promise<StreamableFile> {
 +    return new StreamableFile(await this.service.getVideoPreview(auth, id, time), { type: 'image/jpeg' });
++  }
++
++  @Get(':id/video/preview-sheet')
++  @FileResponse()
++  @ApiNoContentResponse({ description: 'The preview sheet is not ready.' })
++  @Authenticated({ permission: Permission.AssetView, sharedLink: true })
++  @Endpoint({
++    summary: 'Get video preview sheet',
++    description: 'Returns a JPEG grid of timeline previews with the cell layout in X-Immich-Preview-Layout.',
++    history: new HistoryBuilder().added('v3'),
++  })
++  async getAssetVideoPreviewSheet(
++    @Auth() auth: AuthDto,
++    @Param() { id }: UUIDParamDto,
++    @Res() res: Response,
++    @Next() next: NextFunction,
++  ) {
++    const result = await this.service.getVideoPreviewSheet(auth, id);
++    if (!result) {
++      res.header('Cache-Control', 'private, no-store').status(HttpStatus.NO_CONTENT).end();
++      return;
++    }
++    const { width, height, columns, interval, count } = result.layout;
++    res.header('X-Immich-Preview-Layout', [width, height, columns, interval, count].join(','));
++    await sendFile(res, next, () => result.file, this.logger);
 +  }
 +
    @Post('bulk-upload-check')
@@ -236,10 +281,10 @@ index 9e670a6d6fb684cb8f10c941c74feda9c070fef9..89ec2ca938b1bf92dcbd2de3ddbdcb2a
    @Authenticated({ permission: Permission.AssetRead })
    @Endpoint({
 diff --git a/server/src/controllers/index.spec.ts b/server/src/controllers/index.spec.ts
-index 2817fa825c74d235dbc6196c23a83735f3134809..bbb2f80bc41f3f22c7515668ce425ce539d2006e 100644
+index 2817fa825c74d235dbc6196c23a83735f3134809..e414c1e9b74dbc6a661d6ef8c97abf3e19be167b 100644
 --- a/server/src/controllers/index.spec.ts
 +++ b/server/src/controllers/index.spec.ts
-@@ -49,9 +49,11 @@ const SHARED_LINK_ROUTES = new Set([
+@@ -49,9 +49,12 @@ const SHARED_LINK_ROUTES = new Set([
    'GET albums/:id',
    'GET albums/:id/map-markers',
    'GET assets/:id',
@@ -248,9 +293,37 @@ index 2817fa825c74d235dbc6196c23a83735f3134809..bbb2f80bc41f3f22c7515668ce425ce5
    'GET assets/:id/thumbnail',
    'GET assets/:id/video/playback',
 +  'GET assets/:id/video/preview',
++  'GET assets/:id/video/preview-sheet',
    'GET assets/:id/video/stream/:sessionId/:variantIndex/:filename',
    'GET assets/:id/video/stream/:sessionId/:variantIndex/playlist.m3u8',
    'GET assets/:id/video/stream/main.m3u8',
+diff --git a/server/src/cores/storage.core.ts b/server/src/cores/storage.core.ts
+index 405e56416a9a090489a20f7b7968062962c9dab2..1ede83d844adbcf1d4c8d5e11b87efa738bd3c7a 100644
+--- a/server/src/cores/storage.core.ts
++++ b/server/src/cores/storage.core.ts
+@@ -133,6 +133,14 @@ export class StorageCore {
+     return StorageCore.getNestedPath(StorageFolder.EncodedVideo, asset.ownerId, `${asset.id}.mp4`);
+   }
+ 
++  static getVideoPreviewSheetPath(asset: ThumbnailPathEntity & { fileModifiedAt: Date; duration: number | null }) {
++    return StorageCore.getNestedPath(
++      StorageFolder.Thumbnails,
++      asset.ownerId,
++      `${asset.id}_video_preview_v1_${asset.fileModifiedAt.getTime()}_${asset.duration}.jpg`,
++    );
++  }
++
+   static getHlsSessionFolder({ ownerId, sessionId }: HlsSessionFolder) {
+     return StorageCore.getNestedPath(StorageFolder.EncodedVideo, ownerId, sessionId);
+   }
+@@ -332,6 +340,7 @@ export class StorageCore {
+       case AssetFileType.EncodedVideo:
+       case AssetFileType.Thumbnail:
+       case AssetFileType.Preview:
++      case AssetFileType.VideoPreviewSheet:
+       case AssetFileType.Sidecar:
+       case AssetPathType.EncodedVideo: {
+         return this.assetRepository.upsertFile({ assetId: id, type: pathType as AssetFileType, path: newPath });
 diff --git a/server/src/dtos/asset-chapters.dto.ts b/server/src/dtos/asset-chapters.dto.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..ef310dd3f4148cab04fa22ab431bb3a92e609ba1
@@ -322,10 +395,18 @@ index bcdb1937235d938cee62a0032d35d65f9d312f05..3a841ebf7594e500b534918cbcc526a5
    })
    .meta({ id: 'AssetMetadataBulkUpsertItemDto' });
 diff --git a/server/src/enum.ts b/server/src/enum.ts
-index de6307e9064b5f02d599a1d80d80ce84bb1af7fb..3c7e17b898a22d5af75f08327c99cd440eb51432 100644
+index de6307e9064b5f02d599a1d80d80ce84bb1af7fb..72dcc8fdff50410947997b0fb64c51b608384aca 100644
 --- a/server/src/enum.ts
 +++ b/server/src/enum.ts
-@@ -407,6 +407,7 @@ export const UserMetadataKeySchema = z
+@@ -65,6 +65,7 @@ export enum AssetFileType {
+   Thumbnail = 'thumbnail',
+   Sidecar = 'sidecar',
+   EncodedVideo = 'encoded_video',
++  VideoPreviewSheet = 'video_preview_sheet',
+ }
+ 
+ export const AssetFileTypeSchema = z.enum(AssetFileType).describe('Type of file').meta({ id: 'AssetFileType' });
+@@ -407,6 +408,7 @@ export const UserMetadataKeySchema = z
  
  export enum AssetMetadataKey {
    MobileApp = 'mobile-app',
@@ -333,6 +414,23 @@ index de6307e9064b5f02d599a1d80d80ce84bb1af7fb..3c7e17b898a22d5af75f08327c99cd44
  }
  
  export enum UserAvatarColor {
+@@ -477,6 +479,7 @@ export enum ManualJobName {
+   MemoryCleanup = 'memory-cleanup',
+   MemoryCreate = 'memory-create',
+   BackupDatabase = 'backup-database',
++  VideoPreviewSheets = 'video-preview-sheets',
+   IntegrityMissingFiles = `integrity-missing-files`,
+   IntegrityUntrackedFiles = `integrity-untracked-files`,
+   IntegrityChecksumFiles = `integrity-checksum-mismatch`,
+@@ -901,6 +904,8 @@ export enum JobName {
+   AssetFileMigration = 'AssetFileMigration',
+   AssetGenerateThumbnailsQueueAll = 'AssetGenerateThumbnailsQueueAll',
+   AssetGenerateThumbnails = 'AssetGenerateThumbnails',
++  AssetGenerateVideoPreviewSheet = 'AssetGenerateVideoPreviewSheet',
++  AssetGenerateVideoPreviewSheetsQueueAll = 'AssetGenerateVideoPreviewSheetsQueueAll',
+ 
+   AuditTableCleanup = 'AuditTableCleanup',
+ 
 diff --git a/server/src/queries/asset.repository.sql b/server/src/queries/asset.repository.sql
 index c9391ffd58e85b473ec4220977fc9235e7c790e4..74d418039b2f8231ea7d307cb1c833846fdac827 100644
 --- a/server/src/queries/asset.repository.sql
@@ -417,6 +515,30 @@ index 714e138ce8573e981bf932e2316df7d3e957e7cd..2ab6ce24f28cf71746631bbb399303a8
    inner join "asset_video" on "asset"."id" = "asset_video"."assetId"
    inner join "asset_keyframe" on "asset"."id" = "asset_keyframe"."assetId"
  where
+diff --git a/server/src/repositories/asset-job.repository.ts b/server/src/repositories/asset-job.repository.ts
+index e2156934b11a412e26dc9b3216f3b1af3c918bff..e27e401b6682ee52794feaf60e2560e981e3ef17 100644
+--- a/server/src/repositories/asset-job.repository.ts
++++ b/server/src/repositories/asset-job.repository.ts
+@@ -345,6 +345,19 @@ export class AssetJobRepository {
+       .stream();
+   }
+ 
++  streamForVideoPreviewSheets() {
++    return this.db
++      .selectFrom('asset')
++      .select('asset.id')
++      .where('asset.type', '=', AssetType.Video)
++      .where('asset.duration', '>', 0)
++      .where('asset.visibility', '!=', AssetVisibility.Hidden)
++      .where('asset.deletedAt', 'is', null)
++      .where('asset.isOffline', '=', false)
++      .orderBy('asset.duration', 'asc')
++      .stream();
++  }
++
+   @GenerateSql({ params: [DummyValue.UUID] })
+   getForVideoConversion(id: string) {
+     return this.db
 diff --git a/server/src/repositories/asset.repository.ts b/server/src/repositories/asset.repository.ts
 index 6bf649b5c5a7f1a446a7ecad42729c70f4fdf71e..bb2e682bcb18dd49de3e6b1960f35c83f369dfb3 100644
 --- a/server/src/repositories/asset.repository.ts
@@ -430,8 +552,25 @@ index 6bf649b5c5a7f1a446a7ecad42729c70f4fdf71e..bb2e682bcb18dd49de3e6b1960f35c83
        .select((eb) => withFilePath(eb, AssetFileType.EncodedVideo).as('encodedVideoPath'))
        .where('asset.id', '=', id)
        .where('asset.type', '=', AssetType.Video)
+diff --git a/server/src/repositories/job.repository.ts b/server/src/repositories/job.repository.ts
+index 0112fdfb6054f28688ffd635309026053a749eb0..f27876b4822ab8ba74f1d82e47242355bb8d7832 100644
+--- a/server/src/repositories/job.repository.ts
++++ b/server/src/repositories/job.repository.ts
+@@ -269,6 +269,12 @@ export class JobRepository {
+       case JobName.StorageTemplateMigrationSingle: {
+         return { jobId: item.data.id };
+       }
++      case JobName.AssetGenerateVideoPreviewSheet: {
++        return { deduplication: { id: `${item.name}-${item.data.id}` } };
++      }
++      case JobName.AssetGenerateVideoPreviewSheetsQueueAll: {
++        return { deduplication: { id: item.name } };
++      }
+       case JobName.PersonGenerateThumbnail: {
+         return { priority: 1 };
+       }
 diff --git a/server/src/repositories/media.repository.spec.ts b/server/src/repositories/media.repository.spec.ts
-index 02f413b3fbc1658c64bb2120c68970d393dade91..9c1627350f4c30f63e086b83f9c29bc01723b2fc 100644
+index 02f413b3fbc1658c64bb2120c68970d393dade91..e5be660cd8ed6885d6043dc10a56c6bcaf8e75b1 100644
 --- a/server/src/repositories/media.repository.spec.ts
 +++ b/server/src/repositories/media.repository.spec.ts
 @@ -1,6 +1,7 @@
@@ -442,7 +581,7 @@ index 02f413b3fbc1658c64bb2120c68970d393dade91..9c1627350f4c30f63e086b83f9c29bc0
  import sharp from 'sharp';
  import { AssetEditAction, MirrorAxis } from 'src/dtos/editing.dto.js';
  import { Colorspace, ImageFormat } from 'src/enum.js';
-@@ -68,6 +69,38 @@ describe(MediaRepository.name, () => {
+@@ -68,6 +69,51 @@ describe(MediaRepository.name, () => {
      sut = new MediaRepository(automock(LoggingRepository, { args: [, { getEnv: () => ({}) }], strict: false }));
    });
  
@@ -478,14 +617,27 @@ index 02f413b3fbc1658c64bb2120c68970d393dade91..9c1627350f4c30f63e086b83f9c29bc0
 +    await expect(sut.getVideoPreview(input, 10)).resolves.toBeUndefined();
 +  });
 +
++  it.each([1, 5])('generates a single JPEG grid of video frames sampled every %s seconds', async (interval) => {
++    const input = fileURLToPath(new URL('../../test/fixtures/chapters/chapters.mp4', import.meta.url));
++    const image = await sut.generateVideoPreviewSheet(input, {
++      width: 160,
++      height: 90,
++      columns: 2,
++      interval,
++      count: 3,
++    });
++    const { format, width, height } = await sharp(image).metadata();
++    expect({ format, width, height }).toEqual({ format: 'jpeg', width: 320, height: 180 });
++  });
++
    describe('edit (single actions)', () => {
      it('should apply crop edit correctly', async () => {
        const result = sut['edit'](
 diff --git a/server/src/repositories/media.repository.ts b/server/src/repositories/media.repository.ts
-index 9f847a147c3c476794310c6e973f56fdcb620835..465cd6d6616ffe04d3bcc885178661e48808a969 100644
+index 9f847a147c3c476794310c6e973f56fdcb620835..60415a656dca4c8fdb2d61472313b88228d5d3c2 100644
 --- a/server/src/repositories/media.repository.ts
 +++ b/server/src/repositories/media.repository.ts
-@@ -3,9 +3,10 @@ import { ExifDateTime, WriteTags, exiftool } from 'exiftool-vendored';
+@@ -3,10 +3,11 @@ import { ExifDateTime, WriteTags, exiftool } from 'exiftool-vendored';
  import ffmpeg, { FfprobeData, FfprobeStream } from 'fluent-ffmpeg';
  import { camelCase, upperFirst } from 'lodash-es';
  import { Duration } from 'luxon';
@@ -493,19 +645,24 @@ index 9f847a147c3c476794310c6e973f56fdcb620835..465cd6d6616ffe04d3bcc885178661e4
 +import { execFile, spawn } from 'node:child_process';
  import fs from 'node:fs/promises';
  import { Writable } from 'node:stream';
+-import sharp, { Sharp } from 'sharp';
 +import { promisify } from 'node:util';
- import sharp, { Sharp } from 'sharp';
++import sharp, { Sharp, type OverlayOptions } from 'sharp';
  import { ORIENTATION_TO_SHARP_ROTATION } from 'src/constants.js';
  import { Exif } from 'src/database.js';
-@@ -37,6 +38,7 @@ import type {
+ import { AssetEditActionItem } from 'src/dtos/editing.dto.js';
+@@ -37,8 +38,10 @@ import type {
    VideoInfo,
    VideoPacketInfo,
  } from 'src/types.js';
 +import { extractChapters } from 'src/utils/chapters.js';
  import { handlePromiseError } from 'src/utils/misc.js';
  import { createAffineMatrix } from 'src/utils/transform.js';
++import type { VideoPreviewSheetLayout } from 'src/utils/video-preview-sheet.js';
  
-@@ -47,6 +49,7 @@ const probe = (input: string, options: string[]): Promise<FfprobeData> =>
+ const probe = (input: string, options: string[]): Promise<FfprobeData> =>
+   new Promise((resolve, reject) =>
+@@ -47,6 +50,7 @@ const probe = (input: string, options: string[]): Promise<FfprobeData> =>
    );
  
  const pascalCase = (str: string) => upperFirst(camelCase(str.toLowerCase()));
@@ -513,7 +670,7 @@ index 9f847a147c3c476794310c6e973f56fdcb620835..465cd6d6616ffe04d3bcc885178661e4
  
  type ProgressEvent = {
    frames: number;
-@@ -72,6 +75,49 @@ export class MediaRepository {
+@@ -72,6 +76,124 @@ export class MediaRepository {
      sharp.cache({ files: 0 });
    }
  
@@ -560,10 +717,85 @@ index 9f847a147c3c476794310c6e973f56fdcb620835..465cd6d6616ffe04d3bcc885178661e4
 +    }
 +  }
 +
++  async generateVideoPreviewSheet(input: string, layout: VideoPreviewSheetLayout) {
++    const { width, height, columns, interval, count } = layout;
++    if (interval >= 5) {
++      return this.generateSparseVideoPreviewSheet(input, layout);
++    }
++    const filters = [
++      `fps=fps=1/${interval}:start_time=0:round=up`,
++      `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2`,
++      `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`,
++      'setsar=1',
++      `tile=${columns}x${Math.ceil(count / columns)}:nb_frames=${count}`,
++    ];
++    const args = [
++      '-nostdin',
++      '-v',
++      'error',
++      '-protocol_whitelist',
++      'file',
++      '-filter_threads',
++      '1',
++      '-threads',
++      '2',
++      '-i',
++      input,
++      '-map',
++      '0:V:0',
++      '-map_metadata',
++      '-1',
++      '-vf',
++      filters.join(','),
++      '-frames:v',
++      '1',
++      '-c:v',
++      'mjpeg',
++      '-q:v',
++      '5',
++      '-threads',
++      '1',
++      '-f',
++      'image2pipe',
++      'pipe:1',
++    ];
++    const { stdout } = await execFileAsync('ffmpeg', args, {
++      encoding: 'buffer',
++      killSignal: 'SIGKILL',
++      maxBuffer: 4 * 1024 * 1024,
++      timeout: 20 * 60 * 1000,
++    });
++    return stdout;
++  }
++
++  private async generateSparseVideoPreviewSheet(
++    input: string,
++    { width, height, columns, interval, count }: VideoPreviewSheetLayout,
++  ) {
++    const cells: OverlayOptions[] = [];
++    let previous: Buffer | undefined;
++    for (let index = 0; index < count; index++) {
++      const frame = await this.getVideoPreview(input, index * interval);
++      if (frame) {
++        previous = await sharp(frame).resize(width, height, { fit: 'contain', background: 'black' }).toBuffer();
++      }
++      if (!previous) {
++        throw new Error('No frame is available at the start of the video');
++      }
++      cells.push({ input: previous, left: (index % columns) * width, top: Math.floor(index / columns) * height });
++    }
++    return sharp({
++      create: { width: width * columns, height: height * Math.ceil(count / columns), channels: 3, background: 'black' },
++    })
++      .composite(cells)
++      .jpeg({ quality: 82 })
++      .toBuffer();
++  }
++
    /**
    
    @param input file path to the input image
-@@ -254,8 +300,9 @@ export class MediaRepository {
+@@ -254,8 +376,9 @@ export class MediaRepository {
    }
  
    async probe(input: string, options?: ProbeOptions): Promise<VideoInfo> {
@@ -653,7 +885,7 @@ index 1df6dc1a9e48414099bdf5e378224f3d89d80c6f..51c78983425ba50fe40c8a91c431c790
      it('should accept hex and base64 checksums', async () => {
        const file1 = Buffer.from('d2947b871a706081be194569951b7db246907957', 'hex');
 diff --git a/server/src/services/asset-media.service.ts b/server/src/services/asset-media.service.ts
-index 15d356492b677a4e8770280a45c1d89869d7fa49..1eaa984933748bd1d450bcec56bbdef5915a0a92 100644
+index 15d356492b677a4e8770280a45c1d89869d7fa49..35655592e1a33d91f438aad8dc71c135e15e9c6b 100644
 --- a/server/src/services/asset-media.service.ts
 +++ b/server/src/services/asset-media.service.ts
 @@ -1,4 +1,10 @@
@@ -668,7 +900,21 @@ index 15d356492b677a4e8770280a45c1d89869d7fa49..1eaa984933748bd1d450bcec56bbdef5
  import sanitize from 'sanitize-filename';
  import { StorageCore } from 'src/cores/storage.core.js';
  import { Asset, AuthSharedLink } from 'src/database.js';
-@@ -41,8 +47,14 @@ export interface AssetMediaRedirectResponse {
+@@ -20,6 +26,7 @@ import { AssetDownloadOriginalDto } from 'src/dtos/asset.dto.js';
+ import { AuthDto, isEditedOnly, isMetadataHidden } from 'src/dtos/auth.dto.js';
+ import {
+   AssetFileType,
++  AssetType,
+   AssetVisibility,
+   CacheControl,
+   ChecksumAlgorithm,
+@@ -36,13 +43,20 @@ import { isAssetChecksumConstraint } from 'src/utils/database.js';
+ import { ImmichFileResponse, getFileNameWithoutExtension, getFilenameExtension } from 'src/utils/file.js';
+ import { mimeTypes } from 'src/utils/mime-types.js';
+ import { fromChecksum } from 'src/utils/request.js';
++import { getVideoPreviewSheetLayout } from 'src/utils/video-preview-sheet.js';
+ 
+ export interface AssetMediaRedirectResponse {
    targetSize: AssetMediaSize | 'original';
  }
  
@@ -683,7 +929,7 @@ index 15d356492b677a4e8770280a45c1d89869d7fa49..1eaa984933748bd1d450bcec56bbdef5
    async getUploadAssetIdByChecksum(auth: AuthDto, checksum?: string): Promise<AssetMediaResponseDto | undefined> {
      if (!checksum) {
        return;
-@@ -318,6 +330,43 @@ export class AssetMediaService extends BaseService {
+@@ -318,6 +332,70 @@ export class AssetMediaService extends BaseService {
      });
    }
  
@@ -722,6 +968,33 @@ index 15d356492b677a4e8770280a45c1d89869d7fa49..1eaa984933748bd1d450bcec56bbdef5
 +      .finally(() => this.activeVideoPreviews.delete(key));
 +    this.activeVideoPreviews.set(key, preview);
 +    return preview;
++  }
++
++  async getVideoPreviewSheet(auth: AuthDto, id: string) {
++    await this.requireAccess({ auth, permission: Permission.AssetView, ids: [id] });
++    const asset = await this.assetRepository.getById(id, { files: true });
++    if (!asset || asset.type !== AssetType.Video) {
++      throw new NotFoundException('Asset not found or asset is not a video');
++    }
++    const layout = getVideoPreviewSheetLayout(asset.duration);
++    if (!layout || asset.isOffline || asset.deletedAt) {
++      return;
++    }
++    const path = StorageCore.getVideoPreviewSheetPath(asset);
++    if (
++      asset.files?.some((file) => file.type === AssetFileType.VideoPreviewSheet && file.path === path) &&
++      (await this.storageRepository.checkFileExists(path))
++    ) {
++      return {
++        layout,
++        file: new ImmichFileResponse({
++          path,
++          contentType: 'image/jpeg',
++          cacheControl: CacheControl.PrivateWithoutCache,
++        }),
++      };
++    }
++    await this.jobRepository.queue({ name: JobName.AssetGenerateVideoPreviewSheet, data: { id } });
 +  }
 +
    async bulkUploadCheck(auth: AuthDto, dto: AssetBulkUploadCheckDto): Promise<AssetBulkUploadCheckResponseDto> {
@@ -1265,6 +1538,115 @@ index 5282947cc05ae114a13b4c2b4a6d19f17df18696..eb93eb63a5666e5a75bbeb672dd4763a
      }
      session.lastVariantIndex = variantIndex;
      return session;
+diff --git a/server/src/services/job.service.ts b/server/src/services/job.service.ts
+index 374881015ceaf644a40981ffec3c90ddb5c78070..eb64c0d472f3845ed2787e58c5d93cd8da279a55 100644
+--- a/server/src/services/job.service.ts
++++ b/server/src/services/job.service.ts
+@@ -33,6 +33,9 @@ const asJobItem = (dto: JobCreateDto): JobItem => {
+     case ManualJobName.BackupDatabase: {
+       return { name: JobName.DatabaseBackup };
+     }
++    case ManualJobName.VideoPreviewSheets: {
++      return { name: JobName.AssetGenerateVideoPreviewSheetsQueueAll };
++    }
+ 
+     case ManualJobName.IntegrityMissingFiles: {
+       return { name: JobName.IntegrityMissingFilesQueueAll };
+diff --git a/server/src/services/media.service.ts b/server/src/services/media.service.ts
+index 3d86381188a2bbdd6bd3e16732f33ca8d80f3a16..30858965eb617ca8ea79d99b8f92f9ffb9033211 100644
+--- a/server/src/services/media.service.ts
++++ b/server/src/services/media.service.ts
+@@ -45,6 +45,7 @@ import { BaseConfig, ThumbnailConfig } from 'src/utils/media.js';
+ import { mimeTypes } from 'src/utils/mime-types.js';
+ import { batched, clamp } from 'src/utils/misc.js';
+ import { getOutputDimensions } from 'src/utils/transform.js';
++import { getVideoPreviewSheetLayout } from 'src/utils/video-preview-sheet.js';
+ 
+ interface UpsertFileOptions {
+   assetId: string;
+@@ -227,6 +228,10 @@ export class MediaService extends BaseService {
+       await this.assetRepository.update({ id: asset.id, thumbhash });
+     }
+ 
++    if (asset.type === AssetType.Video) {
++      await this.jobRepository.queue({ name: JobName.AssetGenerateVideoPreviewSheet, data: { id } });
++    }
++
+     return JobStatus.Success;
+   }
+ 
+@@ -558,6 +563,71 @@ export class MediaService extends BaseService {
+     return JobStatus.Success;
+   }
+ 
++  @OnJob({ name: JobName.AssetGenerateVideoPreviewSheetsQueueAll, queue: QueueName.VideoConversion })
++  async handleQueueVideoPreviewSheets(): Promise<JobStatus> {
++    for await (const assets of batched(this.assetJobRepository.streamForVideoPreviewSheets())) {
++      await this.jobRepository.queueAll(
++        assets.map(({ id }) => ({ name: JobName.AssetGenerateVideoPreviewSheet, data: { id } })),
++      );
++    }
++    return JobStatus.Success;
++  }
++
++  @OnJob({ name: JobName.AssetGenerateVideoPreviewSheet, queue: QueueName.VideoConversion })
++  async handleVideoPreviewSheet({ id }: JobOf<JobName.AssetGenerateVideoPreviewSheet>): Promise<JobStatus> {
++    const asset = await this.assetRepository.getById(id, { files: true });
++    if (!asset || asset.type !== AssetType.Video || asset.isOffline || asset.deletedAt) {
++      return JobStatus.Skipped;
++    }
++    const layout = getVideoPreviewSheetLayout(asset.duration);
++    if (!layout) {
++      return JobStatus.Skipped;
++    }
++    const path = StorageCore.getVideoPreviewSheetPath(asset);
++    const existing = getAssetFile(asset.files ?? [], AssetFileType.VideoPreviewSheet, { isEdited: false });
++    if (existing?.path === path && (await this.storageRepository.checkFileExists(path))) {
++      return JobStatus.Skipped;
++    }
++
++    const encodedVideo = getAssetFile(asset.files ?? [], AssetFileType.EncodedVideo, { isEdited: false });
++    let jpeg: Buffer;
++    try {
++      jpeg = await this.mediaRepository.generateVideoPreviewSheet(encodedVideo?.path ?? asset.originalPath, layout);
++    } catch (error) {
++      if (!encodedVideo) {
++        throw error;
++      }
++      jpeg = await this.mediaRepository.generateVideoPreviewSheet(asset.originalPath, layout);
++    }
++    if (jpeg.length === 0) {
++      return JobStatus.Skipped;
++    }
++    const latest = await this.assetRepository.getById(id);
++    if (!latest || latest.deletedAt || path !== StorageCore.getVideoPreviewSheetPath(latest)) {
++      return JobStatus.Skipped;
++    }
++
++    this.storageCore.ensureFolders(path);
++    const temporaryPath = `${path}.${this.cryptoRepository.randomUUID()}.tmp`;
++    try {
++      await this.storageRepository.createOrOverwriteFile(temporaryPath, jpeg);
++      await this.storageRepository.rename(temporaryPath, path);
++    } catch (error) {
++      await this.storageRepository.unlink(temporaryPath);
++      throw error;
++    }
++    try {
++      await this.assetRepository.upsertFile({ assetId: id, type: AssetFileType.VideoPreviewSheet, path });
++    } catch (error) {
++      await this.storageRepository.unlink(path);
++      throw error;
++    }
++    if (existing && existing.path !== path) {
++      await this.jobRepository.queue({ name: JobName.FileDelete, data: { files: [existing.path] } });
++    }
++    return JobStatus.Success;
++  }
++
+   @OnJob({ name: JobName.AssetEncodeVideo, queue: QueueName.VideoConversion })
+   async handleVideoConversion({ id }: JobOf<JobName.AssetEncodeVideo>): Promise<JobStatus> {
+     const asset = await this.assetJobRepository.getForVideoConversion(id);
 diff --git a/server/src/services/metadata.service.spec.ts b/server/src/services/metadata.service.spec.ts
 index 255889eae6c895a5516ed619b576cec041d28f97..f07d082e18a0dc2753f4bf9fadfe20b6a27b0358 100644
 --- a/server/src/services/metadata.service.spec.ts
@@ -1609,7 +1991,7 @@ index b0f0c7fa85343c15a43e61a531d86ef03506e893..2b39872bae378f09167a304fa89d23ff
          totalDuration: asset.packets.totalDuration,
        },
 diff --git a/server/src/types.ts b/server/src/types.ts
-index d6310dc4040cd300d8d4541a5cc4a23c5d5aa029..b37aacae539589b410408008fe164d8d3381b259 100644
+index d6310dc4040cd300d8d4541a5cc4a23c5d5aa029..b6604f44316ccf723be8536296b8d533c6d3de2f 100644
 --- a/server/src/types.ts
 +++ b/server/src/types.ts
 @@ -3,6 +3,7 @@ import { ShallowDehydrateObject } from 'kysely';
@@ -1628,6 +2010,15 @@ index d6310dc4040cd300d8d4541a5cc4a23c5d5aa029..b37aacae539589b410408008fe164d8d
  }
  
  export interface TranscodeCommand {
+@@ -353,6 +355,8 @@ export type JobItem =
+   // Thumbnails
+   | { name: JobName.AssetGenerateThumbnailsQueueAll; data: IBaseJob }
+   | { name: JobName.AssetGenerateThumbnails; data: IEntityJob }
++  | { name: JobName.AssetGenerateVideoPreviewSheet; data: IEntityJob }
++  | { name: JobName.AssetGenerateVideoPreviewSheetsQueueAll; data?: IBaseJob }
+ 
+   // User
+   | { name: JobName.UserDeleteCheck; data?: IBaseJob }
 diff --git a/server/src/utils/chapters.spec.ts b/server/src/utils/chapters.spec.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..43984490fbc8b1ca5c87ee9c996b402d829bbd5e
@@ -1991,6 +2382,22 @@ index dfd727565063ff57956bc92bcccfb3415d75323c..e19214e93a1130d4c7dfa624845e644b
    getEncoderOptions(): string[] {
      return [];
    }
+diff --git a/server/src/utils/video-preview-sheet.ts b/server/src/utils/video-preview-sheet.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..cce3bc93302bb4e04fa71ccf47eb1d79d07eb8e5
+--- /dev/null
++++ b/server/src/utils/video-preview-sheet.ts
+@@ -0,0 +1,10 @@
++export function getVideoPreviewSheetLayout(duration: number | null) {
++  if (!duration || duration <= 0) {
++    return;
++  }
++  const seconds = duration / 1000;
++  const interval = Math.max(1, Math.ceil(seconds / 120));
++  return { width: 160, height: 90, columns: 8, interval, count: Math.ceil(seconds / interval) };
++}
++
++export type VideoPreviewSheetLayout = NonNullable<ReturnType<typeof getVideoPreviewSheetLayout>>;
 diff --git a/server/test/fixtures/chapters/README.md b/server/test/fixtures/chapters/README.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..9d2c65c606b179af437a58500c35fbf2dcaded12
@@ -2339,14 +2746,15 @@ index 68452cd543700af5f9209c38ac152f4f7a32e4a6..d863fbbff393413c86e52aa59b1cb0c2
      it('should persist metadata read from a discovered XMP sidecar', async () => {
        await using tempDir = await mkdtempDisposable(join(tmpdir(), 'immich-sidecar-'));
 diff --git a/server/test/repositories/media.repository.mock.ts b/server/test/repositories/media.repository.mock.ts
-index e63d8c054a6d297f16cc43cbf65c8026695199a7..08adddd60a13dea8a11f030306ba612529418734 100644
+index e63d8c054a6d297f16cc43cbf65c8026695199a7..593634535f5f99b3eb2bafe712a080845064c546 100644
 --- a/server/test/repositories/media.repository.mock.ts
 +++ b/server/test/repositories/media.repository.mock.ts
-@@ -5,6 +5,7 @@ import type { RepositoryInterface } from 'src/types.js';
+@@ -5,6 +5,8 @@ import type { RepositoryInterface } from 'src/types.js';
  export const newMediaRepositoryMock = (): Mocked<RepositoryInterface<MediaRepository>> => {
    return {
      generateThumbnail: vitest.fn().mockImplementation(() => Promise.resolve()),
 +    getVideoPreview: vitest.fn().mockResolvedValue(undefined),
++    generateVideoPreviewSheet: vitest.fn(),
      writeExif: vitest.fn().mockImplementation(() => Promise.resolve()),
      copyTagGroup: vitest.fn().mockImplementation(() => Promise.resolve()),
      generateThumbhash: vitest.fn().mockResolvedValue(Buffer.from('')),
@@ -2475,7 +2883,7 @@ index 0000000000000000000000000000000000000000..27be749cc4703e01051fad52d0c78514
 +  </details>
 +{/if}
 diff --git a/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte b/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte
-index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd50229ef33cf 100644
+index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..94753ad7dcc5db9ae1b49a5ff8159adb5a1e4bd8 100644
 --- a/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte
 +++ b/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte
 @@ -1,11 +1,14 @@
@@ -2493,7 +2901,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
    import { createPreloadedQuery } from '#lib/queries/client.ts';
    import { getPublicConfigQuery } from '#lib/queries/config-public.query.ts';
    import { autoPlayVideo, lang, loopVideo as loopVideoPreference } from '#lib/stores/preferences.store.ts';
-@@ -25,9 +28,17 @@
+@@ -25,19 +28,28 @@
      mdiVolumeMedium,
      mdiVolumeMute,
    } from '@mdi/js';
@@ -2512,7 +2920,11 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
    import 'media-chrome/media-control-bar';
    import 'media-chrome/media-controller';
    import 'media-chrome/media-fullscreen-button';
-@@ -37,7 +48,6 @@
+   import 'media-chrome/media-mute-button';
+   import 'media-chrome/media-play-button';
+   import 'media-chrome/media-playback-rate-button';
++  import 'media-chrome/media-seek-backward-button';
++  import 'media-chrome/media-seek-forward-button';
    import 'media-chrome/media-time-display';
    import 'media-chrome/media-volume-range';
    import 'media-chrome/menu/media-playback-rate-menu';
@@ -2520,7 +2932,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
    import 'media-chrome/menu/media-settings-menu';
    import 'media-chrome/menu/media-settings-menu-button';
    import 'media-chrome/menu/media-settings-menu-item';
-@@ -45,7 +55,7 @@
+@@ -45,7 +57,7 @@
    import { useSwipe, type SwipeCustomEvent } from 'svelte-gestures';
    import { t } from 'svelte-i18n';
    import { fade } from 'svelte/transition';
@@ -2529,7 +2941,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
  
    const query = createPreloadedQuery(getPublicConfigQuery);
    const publicConfig = $derived(query.data);
-@@ -79,6 +89,20 @@
+@@ -79,6 +91,20 @@
    }: Props = $props();
  
    let videoPlayer: HTMLVideoElement | undefined = $state();
@@ -2550,7 +2962,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
    let isLoading = $state(true);
    let hasLoadedMetadata = $state(false);
    let assetFileUrl = $derived.by(() => {
-@@ -94,6 +118,7 @@
+@@ -94,6 +120,7 @@
    });
    const aspectRatio = $derived(asset.width && asset.height ? `${asset.width} / ${asset.height}` : undefined);
    let showVideo = $state(false);
@@ -2558,7 +2970,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
    let hasFocused = $state(false);
    let activeSession: { assetId: string; id: string } | undefined;
    let rebuildCount = 0;
-@@ -101,6 +126,8 @@
+@@ -101,6 +128,8 @@
    const MAX_REBUILDS = 1;
    const SESSION_ID_REGEX = /\/video\/stream\/([0-9a-f-]{36})\//;
  
@@ -2567,7 +2979,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
    // hls.js can abandon fetching an in-flight fragment if it thinks it'll take too long, in which case
    // it emergency switches to a different variant. This extends the delay even further due to
    // cold starting another transcode, so let the fragment finish and have steady ABR decide the next level.
-@@ -112,6 +139,21 @@
+@@ -112,6 +141,21 @@
    class NoAbandonAbrController extends AbrController {
      private switchTarget = -1;
  
@@ -2589,7 +3001,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
      protected override onFragLoading(_event: Events.FRAG_LOADING, data: FragLoadingData) {
        if (data.frag.sn === 'initSegment') {
          this.switchTarget = data.frag.level;
-@@ -126,10 +168,15 @@
+@@ -126,10 +170,15 @@
      }
  
      override get nextAutoLevel(): number {
@@ -2608,7 +3020,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
          return this.switchTarget;
        }
        return level;
-@@ -192,7 +239,7 @@
+@@ -192,7 +241,7 @@
      // That backward request causes the server to restart transcoding for no reason.
      Object.defineProperty(api, 'nextLevel', {
        configurable: true,
@@ -2617,7 +3029,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
        set: (level: number) => {
          api.currentLevel = level;
        },
-@@ -207,9 +254,12 @@
+@@ -207,9 +256,12 @@
          activeSession = { assetId, id };
        }
  
@@ -2631,7 +3043,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
            api.removeLevel(i);
          }
        }
-@@ -247,6 +297,8 @@
+@@ -247,6 +299,8 @@
    $effect(() => {
      // reactive on `assetFileUrl` changes
      hasLoadedMetadata = false;
@@ -2640,7 +3052,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
      if (videoPlayer && assetFileUrl) {
        hasFocused = false;
        rebuildCount = 0;
-@@ -391,7 +443,9 @@
+@@ -391,7 +445,9 @@
              {...useSwipe(onSwipe)}
              class="h-full object-contain"
              oncanplay={(e: Event) => handleCanPlay(e.currentTarget as HTMLVideoElement)}
@@ -2651,7 +3063,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
              onended={onVideoEnded}
              onseeking={onSeeking}
              onplaying={(e: Event) => {
-@@ -417,7 +471,9 @@
+@@ -417,7 +473,9 @@
              {...useSwipe(onSwipe)}
              class="h-full object-contain"
              oncanplay={(e) => handleCanPlay(e.currentTarget)}
@@ -2662,7 +3074,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
              onended={onVideoEnded}
              onseeking={onSeeking}
              onplaying={(e) => {
-@@ -434,7 +490,7 @@
+@@ -434,7 +492,7 @@
          {/if}
  
          {#if extendedControls}
@@ -2671,7 +3083,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
              <Icon slot="checked-indicator" icon={mdiCheck} class="m-2" />
              <media-settings-menu-item class="mx-1 rounded-lg p-1 ps-2">
                {$t('media_chrome.playback_rate')}
-@@ -448,10 +504,15 @@
+@@ -448,28 +506,39 @@
                <media-settings-menu-item class="mx-1 rounded-lg p-1 ps-2">
                  {$t('video_quality')}
                  <Icon slot="suffix" icon={mdiChevronRight} class="m-2" />
@@ -2689,7 +3101,24 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
                </media-settings-menu-item>
              {/if}
            </media-settings-menu>
-@@ -470,6 +531,8 @@
+         {/if}
+ 
+-        <div class="relative isolate flex h-32 w-full flex-col justify-end px-4">
++        <div class="relative isolate flex h-32 w-full flex-col justify-end px-2 sm:px-4">
+           <div
+             class="pointer-events-none absolute inset-x-0 bottom-0 -z-10 h-48 bg-black/80 mask-smoothstep-to-top"
+           ></div>
+-          <media-control-bar part="bottom" class="flex h-10 w-full gap-2">
++          <media-control-bar part="bottom" class="flex h-10 w-full gap-0.5 sm:gap-2">
++            <media-seek-backward-button seekoffset="10" class="shrink-0 rounded-full p-1.5 outline-none sm:p-2"
++            ></media-seek-backward-button>
+             <media-play-button class="shrink-0 rounded-full p-2 outline-none">
+               <Icon slot="play" icon={mdiPlay} />
+               <Icon slot="pause" icon={mdiPause} />
+             </media-play-button>
++            <media-seek-forward-button seekoffset="10" class="shrink-0 rounded-full p-1.5 outline-none sm:p-2"
++            ></media-seek-forward-button>
+             <media-time-display showduration class="rounded-lg p-2 outline-none"></media-time-display>
  
              <span class="grow"></span>
  
@@ -2698,7 +3127,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
              <div
                class="volume-wrapper shrink-0 rounded-full bg-light-100/0 transition-colors duration-400 hover:bg-light-100"
              >
-@@ -490,7 +553,7 @@
+@@ -490,7 +559,7 @@
                <media-settings-menu-button class="shrink-0 rounded-full p-2 outline-none"></media-settings-menu-button>
              {/if}
            </media-control-bar>
@@ -2707,7 +3136,7 @@ index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd502
          </div>
        </media-controller>
  
-@@ -548,12 +611,12 @@
+@@ -548,12 +617,12 @@
      font-variant-numeric: tabular-nums;
    }
  
@@ -2776,12 +3205,12 @@ index 0000000000000000000000000000000000000000..2818dd39f8f5e18f059af755c888b11f
 +});
 diff --git a/web/src/lib/components/asset-viewer/VideoTimeline.svelte b/web/src/lib/components/asset-viewer/VideoTimeline.svelte
 new file mode 100644
-index 0000000000000000000000000000000000000000..f4b21c2e0116839fb06dd9bf30b739f5a0462dfe
+index 0000000000000000000000000000000000000000..fe4b599ec360aef3f3beb493a434bcbafdbd5b1f
 --- /dev/null
 +++ b/web/src/lib/components/asset-viewer/VideoTimeline.svelte
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,151 @@
 +<script lang="ts">
-+  import { getAssetVideoPreviewUrl } from '#lib/utils.ts';
++  import { getAssetVideoPreviewSheetUrl, getAssetVideoPreviewUrl } from '#lib/utils.ts';
 +  import type { AssetChapterResponseDto } from '@immich/sdk';
 +  import { MediaUIEvents } from 'media-chrome/constants';
 +  import './immich-time-range.ts';
@@ -2793,13 +3222,74 @@ index 0000000000000000000000000000000000000000..f4b21c2e0116839fb06dd9bf30b739f5
 +  let pointerTime: number | null = $state(null);
 +  let requestedUrl: string | undefined = $state();
 +  let imageReady = $state(false);
-+  const previewUrl = $derived.by(() => {
++  let sheet = $state<{
++    url: string;
++    width: number;
++    height: number;
++    columns: number;
++    interval: number;
++    count: number;
++  }>();
++  const seekTime = $derived.by(() => {
 +    if (pointerTime === null || !Number.isFinite(pointerTime) || !Number.isFinite(duration) || duration <= 0) {
 +      return;
 +    }
++    return Math.max(0, Math.min(pointerTime, duration - 0.001));
++  });
++  const previewUrl = $derived.by(() => {
++    if (seekTime === undefined || sheet) {
++      return;
++    }
 +    const interval = Math.max(1, Math.ceil(duration / 120));
-+    const time = Math.max(0, Math.min(pointerTime, duration - 0.001));
-+    return getAssetVideoPreviewUrl(assetId, Math.floor(time / interval) * interval);
++    return getAssetVideoPreviewUrl(assetId, Math.floor(seekTime / interval) * interval);
++  });
++  const cell = $derived(
++    sheet && seekTime !== undefined ? Math.min(sheet.count - 1, Math.floor(seekTime / sheet.interval)) : undefined,
++  );
++
++  $effect(() => {
++    const url = getAssetVideoPreviewSheetUrl(assetId);
++    const request = new AbortController();
++    let objectUrl: string | undefined;
++    let retry: ReturnType<typeof setTimeout> | undefined;
++    sheet = undefined;
++
++    const preload = async (remaining: number) => {
++      const response = await fetch(url, { signal: request.signal });
++      if (response.status === 204 && remaining > 0) {
++        retry = setTimeout(() => void preload(remaining - 1).catch(() => {}), 5000);
++        return;
++      }
++      const layout = response.headers.get('X-Immich-Preview-Layout')?.split(',').map(Number);
++      if (!response.ok || layout?.length !== 5 || layout.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
++        return;
++      }
++      const [width, height, columns, interval, count] = layout;
++      const blob = await response.blob();
++      if (request.signal.aborted) {
++        return;
++      }
++      objectUrl = URL.createObjectURL(blob);
++      const image = new Image();
++      image.src = objectUrl;
++      await image.decode();
++      if (
++        !request.signal.aborted &&
++        image.naturalWidth === width * columns &&
++        image.naturalHeight === height * Math.ceil(count / columns)
++      ) {
++        sheet = { url: objectUrl, width, height, columns, interval, count };
++      }
++    };
++
++    void preload(12).catch(() => {});
++    return () => {
++      request.abort();
++      clearTimeout(retry);
++      if (objectUrl) {
++        URL.revokeObjectURL(objectUrl);
++      }
++    };
 +  });
 +
 +  $effect(() => {
@@ -2827,9 +3317,25 @@ index 0000000000000000000000000000000000000000..f4b21c2e0116839fb06dd9bf30b739f5
 +</script>
 +
 +<div class="relative h-8 w-full px-2 pb-3">
-+  <immich-time-range bind:this={range} class="size-full rounded-lg outline-none">
++  <immich-time-range
++    bind:this={range}
++    class="size-full rounded-lg outline-none"
++    style:--media-preview-transition-delay-in="0s"
++    style:--media-preview-transition-duration-in="0s"
++  >
 +    <div slot="preview" class="flex flex-col items-center overflow-hidden rounded-lg bg-black/85 text-white shadow-md">
-+      {#if requestedUrl && requestedUrl === previewUrl}
++      {#if sheet && cell !== undefined}
++        <div class="relative overflow-hidden" style:width={`${sheet.width}px`} style:height={`${sheet.height}px`}>
++          <img
++            src={sheet.url}
++            alt=""
++            class="absolute max-w-none"
++            style:width={`${sheet.width * sheet.columns}px`}
++            style:left={`${-(cell % sheet.columns) * sheet.width}px`}
++            style:top={`${-Math.floor(cell / sheet.columns) * sheet.height}px`}
++          />
++        </div>
++      {:else if requestedUrl && requestedUrl === previewUrl}
 +        {#key requestedUrl}
 +          <img
 +            src={requestedUrl}
@@ -2941,29 +3447,33 @@ index 0000000000000000000000000000000000000000..37cfa00a5d516ba5dafd7b0ac24d0e5e
 +    queryFn: ({ signal }) => getAssetChapters({ id, ...authManager.params }, { signal }),
 +  });
 diff --git a/web/src/lib/utils.ts b/web/src/lib/utils.ts
-index febeaaf33d5e7be4f9c3765d03e25c391d289ff1..71a8472589971ecb3c5c48788f8d44adf0e9e64d 100644
+index febeaaf33d5e7be4f9c3765d03e25c391d289ff1..f640d9aebd862125dc6a3ad31dc1cbf7e875f017 100644
 --- a/web/src/lib/utils.ts
 +++ b/web/src/lib/utils.ts
-@@ -12,6 +12,7 @@ import {
+@@ -12,6 +12,8 @@ import {
    getAssetOriginalPath,
    getAssetPlaybackPath,
    getAssetThumbnailPath,
 +  getAssetVideoPreviewPath,
++  getAssetVideoPreviewSheetPath,
    getBaseUrl,
    getPeopleThumbnailPath,
    getUserProfileImagePath,
-@@ -243,6 +244,9 @@ export const getAssetPlaybackUrl = (options: AssetUrlOptions) => {
+@@ -243,6 +245,12 @@ export const getAssetPlaybackUrl = (options: AssetUrlOptions) => {
    return createUrl(getAssetPlaybackPath(id), { ...authManager.params, c });
  };
  
 +export const getAssetVideoPreviewUrl = (id: string, time: number) =>
 +  createUrl(getAssetVideoPreviewPath(id), { ...authManager.params, time });
 +
++export const getAssetVideoPreviewSheetUrl = (id: string) =>
++  createUrl(getAssetVideoPreviewSheetPath(id), authManager.params);
++
  export const getAssetHlsUrl = (id: string) => {
    return createUrl(`/assets/${id}/video/stream/main.m3u8`, authManager.params);
  };
 diff --git a/web/test/common/handlers.ts b/web/test/common/handlers.ts
-index 303625b44c7eae82cca06d02deaf822b6c7feafa..4c1cf6bac930b407ec3067f6d7f83838a426d58b 100644
+index 303625b44c7eae82cca06d02deaf822b6c7feafa..65e97f0da4557d3ec55b0555bf2bf9bb0309d746 100644
 --- a/web/test/common/handlers.ts
 +++ b/web/test/common/handlers.ts
 @@ -75,6 +75,7 @@ export const createHandlers = (data: MockData): Handlers => {
@@ -2974,20 +3484,21 @@ index 303625b44c7eae82cca06d02deaf822b6c7feafa..4c1cf6bac930b407ec3067f6d7f83838
      checkBulkUpload: ({ body }) => ({
        json: { results: body.assets.map(({ id }) => ({ id, action: AssetUploadAction.Accept })) },
      }),
-@@ -176,6 +177,7 @@ export const createHandlers = (data: MockData): Handlers => {
+@@ -176,6 +177,8 @@ export const createHandlers = (data: MockData): Handlers => {
      }),
  
      playAssetVideo: () => ({ body: minimalMp4, contentType: 'video/mp4' }),
 +    getAssetVideoPreview: ({ params }) => media(params.id),
++    getAssetVideoPreviewSheet: () => ({ status: 204 }),
      viewAsset: ({ params }) => media(params.id),
      downloadAsset: ({ params }) => media(params.id),
    };
 diff --git a/web/test/medium/specs/asset-viewer/chapters.spec.ts b/web/test/medium/specs/asset-viewer/chapters.spec.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..16fd7d91497f91e39ee6b944da5914e8bc6259f5
+index 0000000000000000000000000000000000000000..7afa11611d39bb1a282523c278060fbcaec7916d
 --- /dev/null
 +++ b/web/test/medium/specs/asset-viewer/chapters.spec.ts
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,209 @@
 +import { Route } from '#lib/route.ts';
 +import { factory } from '#test/common/factories.ts';
 +import { expect, test } from '#test/medium/fixtures.ts';
@@ -3012,6 +3523,11 @@ index 0000000000000000000000000000000000000000..16fd7d91497f91e39ee6b944da5914e8
 +  { startTime: 1, endTime: 2, title: 'Snow = 雪' },
 +  { startTime: 2, endTime: 3, title: null },
 +];
++const previewSheetResponse = {
++  body: '<svg xmlns="http://www.w3.org/2000/svg" width="72" height="12"><path fill="red" d="M0 0h24v12H0z"/><path fill="green" d="M24 0h24v12H24z"/><path fill="blue" d="M48 0h24v12H48z"/></svg>',
++  contentType: 'image/svg+xml',
++  headers: { 'X-Immich-Preview-Layout': '24,12,3,1,3' },
++};
 +
 +test.afterEach(async ({ page }) => {
 +  await page.evaluate(() => {
@@ -3034,6 +3550,7 @@ index 0000000000000000000000000000000000000000..16fd7d91497f91e39ee6b944da5914e8
 +    data.addAssets(asset);
 +    api.on({
 +      getAssetChapters: () => ({ json: chapters }),
++      getAssetVideoPreviewSheet: () => previewSheetResponse,
 +      playAssetVideo: () => videoResponse,
 +      downloadAsset: () => videoResponse,
 +    });
@@ -3079,12 +3596,31 @@ index 0000000000000000000000000000000000000000..16fd7d91497f91e39ee6b944da5914e8
 +    await timeline.hover({ position: { x: Math.round(bounds.width * 0.47), y: Math.round(bounds.height / 2) } });
 +    const preview = timeline.locator('[slot="preview"]');
 +    await expect(preview.locator('img')).toBeVisible();
-+    await expect(preview.locator('img')).toHaveAttribute('src', /[?&]time=1(?:&|$)/);
++    const image = preview.locator('img');
++    await expect(image).toHaveAttribute('src', /^blob:/);
++    await expect(image).toHaveCSS('left', '-24px');
 +    await expect(preview.locator('media-preview-time-display')).toContainText('0:01');
-+    if (sharedKey) {
-+      await expect(preview.locator('img')).toHaveAttribute('src', /[?&]key=/);
-+    }
++    const imageUrl = await image.getAttribute('src');
++    await page.mouse.down();
++    await page.mouse.move(bounds.x + bounds.width * 0.85, bounds.y + bounds.height / 2);
++    await expect(image).toHaveCSS('left', '-48px');
++    await expect(image).toHaveAttribute('src', imageUrl!);
++    await page.mouse.up();
++    expect(api.getAssetVideoPreview).not.toHaveBeenCalled();
++    expect(api.getAssetVideoPreviewSheet).toHaveBeenCalledWith({
++      params: expect.objectContaining({ id: asset.id, ...(sharedKey && { key: sharedKey }) }),
++    });
 +    if (playback === 'transcoded') {
++      const forward = page.locator('media-seek-forward-button');
++      const backward = page.locator('media-seek-backward-button');
++      await expect(forward).toHaveAttribute('seekoffset', '10');
++      await expect(backward).toHaveAttribute('seekoffset', '10');
++      await forward.click();
++      await expect
++        .poll(() => video.evaluate((element: HTMLVideoElement) => element.duration - element.currentTime))
++        .toBeCloseTo(0, 2);
++      await backward.click();
++      await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBe(0);
 +      await page.getByTitle('video_chapters', { exact: true }).focus();
 +      await page.keyboard.press('Enter');
 +      await page.keyboard.press('Tab');

@@ -23,6 +23,8 @@
         "src/controllers/asset-media.controller.spec.ts",
         "src/services/asset-media.service.spec.ts",
         "src/services/hls.service.spec.ts",
+        "src/services/job.service.spec.ts",
+        "src/services/media.service.spec.ts",
         "src/services/transcoding.service.spec.ts"
       ],
       "flavor": "player",
