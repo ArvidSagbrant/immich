@@ -2,6 +2,7 @@ import { Route } from '#lib/route.ts';
 import { factory } from '#test/common/factories.ts';
 import { expect, test } from '#test/medium/fixtures.ts';
 import { AssetTypeEnum, SharedLinkType } from '@immich/sdk';
+import type HlsVideoElement from 'hls-video-element';
 import { readFileSync } from 'node:fs';
 
 const videoData = new Uint8Array(
@@ -82,7 +83,17 @@ for (const playback of ['original', 'transcoded', 'shared-link']) {
     await chapter.click();
     await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeCloseTo(1, 2);
     await expect(video).toHaveAttribute('src', source!);
-    await expect(page.locator('immich-time-range').locator('..').locator('[aria-hidden] > span')).toHaveCount(2);
+    const timeline = page.locator('immich-time-range');
+    await expect(timeline.locator('..').locator('[aria-hidden] > span')).toHaveCount(2);
+    const bounds = (await timeline.boundingBox())!;
+    await timeline.hover({ position: { x: Math.round(bounds.width * 0.47), y: Math.round(bounds.height / 2) } });
+    const preview = timeline.locator('[slot="preview"]');
+    await expect(preview.locator('img')).toBeVisible();
+    await expect(preview.locator('img')).toHaveAttribute('src', /[?&]time=1(?:&|$)/);
+    await expect(preview.locator('media-preview-time-display')).toContainText('0:01');
+    if (sharedKey) {
+      await expect(preview.locator('img')).toHaveAttribute('src', /[?&]key=/);
+    }
     if (playback === 'transcoded') {
       await page.getByTitle('video_chapters', { exact: true }).focus();
       await page.keyboard.press('Enter');
@@ -96,3 +107,78 @@ for (const playback of ['original', 'transcoded', 'shared-link']) {
     });
   });
 }
+
+test('switches between Original and Auto without losing chapter navigation', async ({ page, data, api }) => {
+  data.publicConfig.ffmpeg.realtime.enabled = true;
+  const asset = factory.asset({ type: AssetTypeEnum.Video, duration: 3000, width: 32, height: 32 });
+  const session = '08351af7-bf08-4914-bb52-fa4d56ade949';
+  const video = readFileSync(new URL('fixtures/chapter-quality.mp4', import.meta.url));
+  const mediaOffset = video.indexOf('moof') - 4;
+  data.addAssets(asset);
+  api.on({
+    getAssetChapters: () => ({ json: chapters }),
+    getMainPlaylist: () => ({
+      body: [
+        '#EXTM3U',
+        '#EXT-X-VERSION:7',
+        '#EXT-X-STREAM-INF:BANDWIDTH=10000,RESOLUTION=32x32,CODECS="avc1.64000a"',
+        `${session}/0/playlist.m3u8`,
+        '#EXT-X-STREAM-INF:BANDWIDTH=20000,RESOLUTION=32x32,CODECS="avc1.64000a",STABLE-VARIANT-ID="original"',
+        `${session}/15/playlist.m3u8`,
+        '',
+      ].join('\n'),
+      contentType: 'application/vnd.apple.mpegurl',
+    }),
+    getMediaPlaylist: () => ({
+      body: [
+        '#EXTM3U',
+        '#EXT-X-VERSION:7',
+        '#EXT-X-TARGETDURATION:3',
+        '#EXT-X-MEDIA-SEQUENCE:0',
+        '#EXT-X-MAP:URI="init.mp4"',
+        '#EXTINF:3.0,',
+        'seg_0.m4s',
+        '#EXT-X-ENDLIST',
+        '',
+      ].join('\n'),
+      contentType: 'application/vnd.apple.mpegurl',
+    }),
+    getSegment: ({ params }) => ({
+      body: new Uint8Array(
+        params.filename === 'init.mp4' ? video.subarray(0, mediaOffset) : video.subarray(mediaOffset),
+      ),
+      contentType: 'video/mp4',
+    }),
+    endSession: () => ({ status: 204 }),
+  });
+
+  await page.goto(Route.photos());
+  await page.evaluate(() => localStorage.setItem('auto-play-video', 'false'));
+  await page.goto(Route.viewAsset(asset));
+
+  const player = page.locator('hls-video');
+  await expect.poll(() => player.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThanOrEqual(1);
+  const openQualityMenu = async () => {
+    await page.locator('media-settings-menu-button').click();
+    await page
+      .locator('media-settings-menu > media-settings-menu-item')
+      .filter({ has: page.locator('immich-rendition-menu') })
+      .click();
+  };
+
+  await openQualityMenu();
+  const originalPlaylist = page.waitForResponse((response) => response.url().includes(`${session}/15/playlist.m3u8`));
+  await page.getByRole('menuitemradio', { name: 'video_quality_original' }).click();
+  await expect.poll(() => player.evaluate((element: HlsVideoElement) => element.api?.manualLevel)).toBe(1);
+  const response = await originalPlaylist;
+  expect(response.ok()).toBe(true);
+
+  await page.getByTitle('video_chapters', { exact: true }).click();
+  await page.getByRole('button', { name: '0:01 Snow = 雪' }).click();
+  await expect.poll(() => player.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeCloseTo(1, 2);
+
+  await openQualityMenu();
+  await page.locator('immich-rendition-menu [role="menuitemradio"][value="auto"]').click();
+  await expect.poll(() => player.evaluate((element: HlsVideoElement) => element.api?.manualLevel)).toBe(-1);
+  await page.goto(Route.photos());
+});

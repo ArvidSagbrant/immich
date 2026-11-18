@@ -77,5 +77,8 @@ const AssetBulkUploadCheckSchema = z
   .meta({ id: 'AssetBulkUploadCheckDto' });
 
 export class AssetMediaOptionsDto extends createZodDto(AssetMediaOptionsSchema) {}
+export class VideoPreviewOptionsDto extends createZodDto(
+  z.object({ time: z.coerce.number().int().min(0).max(2_147_483_647).describe('Timestamp in whole seconds') }),
+) {}
 export class AssetMediaCreateDto extends createZodDto(AssetMediaCreateSchema) {}
 export class AssetBulkUploadCheckDto extends createZodDto(AssetBulkUploadCheckSchema) {}

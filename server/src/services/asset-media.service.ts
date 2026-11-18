@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  InternalServerErrorException,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import sanitize from 'sanitize-filename';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { Asset, AuthSharedLink } from 'src/database.js';
@@ -41,8 +47,14 @@ export interface AssetMediaRedirectResponse {
   targetSize: AssetMediaSize | 'original';
 }
 
+const MAX_CACHED_VIDEO_PREVIEWS = 128;
+const MAX_ACTIVE_VIDEO_PREVIEWS = 2;
+
 @Injectable()
 export class AssetMediaService extends BaseService {
+  private readonly videoPreviews = new Map<string, Buffer>();
+  private readonly activeVideoPreviews = new Map<string, Promise<Buffer>>();
+
   async getUploadAssetIdByChecksum(auth: AuthDto, checksum?: string): Promise<AssetMediaResponseDto | undefined> {
     if (!checksum) {
       return;
@@ -316,6 +328,43 @@ export class AssetMediaService extends BaseService {
       contentType: mimeTypes.lookup(filepath),
       cacheControl: CacheControl.PrivateWithCache,
     });
+  }
+
+  async getVideoPreview(auth: AuthDto, id: string, time: number): Promise<Buffer> {
+    await this.requireAccess({ auth, permission: Permission.AssetView, ids: [id] });
+    const asset = await this.assetRepository.getForVideo(id);
+    if (!asset) {
+      throw new NotFoundException('Asset not found or asset is not a video');
+    }
+
+    const key = `${id}:${asset.updatedAt.toISOString()}:${time}`;
+    const cached = this.videoPreviews.get(key);
+    if (cached) {
+      return cached;
+    }
+    const active = this.activeVideoPreviews.get(key);
+    if (active) {
+      return active;
+    }
+    if (this.activeVideoPreviews.size >= MAX_ACTIVE_VIDEO_PREVIEWS) {
+      throw new ServiceUnavailableException('Video preview workers are busy');
+    }
+
+    const preview = this.mediaRepository
+      .getVideoPreview(asset.originalPath, time)
+      .then((image) => {
+        if (!image) {
+          throw new NotFoundException('Video frame is not available');
+        }
+        this.videoPreviews.set(key, image);
+        if (this.videoPreviews.size > MAX_CACHED_VIDEO_PREVIEWS) {
+          this.videoPreviews.delete(this.videoPreviews.keys().next().value!);
+        }
+        return image;
+      })
+      .finally(() => this.activeVideoPreviews.delete(key));
+    this.activeVideoPreviews.set(key, preview);
+    return preview;
   }
 
   async bulkUploadCheck(auth: AuthDto, dto: AssetBulkUploadCheckDto): Promise<AssetBulkUploadCheckResponseDto> {

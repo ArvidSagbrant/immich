@@ -5272,6 +5272,86 @@
         "x-immich-state": "Stable"
       }
     },
+    "/assets/{id}/video/preview": {
+      "get": {
+        "description": "Returns a small JPEG preview of the video at the given timestamp.",
+        "operationId": "getAssetVideoPreview",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "slug",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "time",
+            "required": true,
+            "in": "query",
+            "description": "Timestamp in whole seconds",
+            "schema": {
+              "minimum": 0,
+              "maximum": 2147483647,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "cookie": []
+          },
+          {
+            "api_key": []
+          }
+        ],
+        "summary": "Preview a video position",
+        "tags": [
+          "Assets"
+        ],
+        "x-immich-history": [
+          {
+            "version": "v3",
+            "state": "Added"
+          }
+        ],
+        "x-immich-permission": "asset.view"
+      }
+    },
     "/assets/{id}/video/stream/main.m3u8": {
       "get": {
         "description": "Returns an HLS main playlist with all available variants for the asset.",

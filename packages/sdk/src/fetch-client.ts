@@ -5169,6 +5169,26 @@ export function playAssetVideo({ id, key, slug }: {
     }));
 }
 /**
+ * Preview a video position
+ */
+export function getAssetVideoPreview({ id, key, slug, time }: {
+    id: string;
+    key?: string;
+    slug?: string;
+    time: number;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchBlob<{
+        status: 200;
+        data: Blob;
+    }>(`/assets/${encodeURIComponent(id)}/video/preview${QS.query(QS.explode({
+        key,
+        slug,
+        time
+    }))}`, {
+        ...opts
+    }));
+}
+/**
  * Get HLS main playlist
  */
 export function getMainPlaylist({ id, key, slug }: {

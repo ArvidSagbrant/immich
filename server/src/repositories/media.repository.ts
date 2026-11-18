@@ -3,9 +3,10 @@ import { ExifDateTime, WriteTags, exiftool } from 'exiftool-vendored';
 import ffmpeg, { FfprobeData, FfprobeStream } from 'fluent-ffmpeg';
 import { camelCase, upperFirst } from 'lodash-es';
 import { Duration } from 'luxon';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { Writable } from 'node:stream';
+import { promisify } from 'node:util';
 import sharp, { Sharp } from 'sharp';
 import { ORIENTATION_TO_SHARP_ROTATION } from 'src/constants.js';
 import { Exif } from 'src/database.js';
@@ -48,6 +49,7 @@ const probe = (input: string, options: string[]): Promise<FfprobeData> =>
   );
 
 const pascalCase = (str: string) => upperFirst(camelCase(str.toLowerCase()));
+const execFileAsync = promisify(execFile);
 
 type ProgressEvent = {
   frames: number;
@@ -71,6 +73,49 @@ export class MediaRepository {
     sharp.concurrency(0);
     // eslint-disable-next-line import-x/no-named-as-default-member
     sharp.cache({ files: 0 });
+  }
+
+  async getVideoPreview(input: string, time: number): Promise<Buffer | undefined> {
+    const args = [
+      '-nostdin',
+      '-v',
+      'error',
+      '-protocol_whitelist',
+      'file',
+      '-filter_threads',
+      '1',
+      '-threads',
+      '2',
+      '-ss',
+      String(time),
+      '-i',
+      input,
+      '-map',
+      '0:V:0',
+      '-vf',
+      'scale=192:108:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1',
+      '-frames:v',
+      '1',
+      '-c:v',
+      'mjpeg',
+      '-threads',
+      '1',
+      '-f',
+      'image2pipe',
+      'pipe:1',
+    ];
+
+    try {
+      const { stdout } = await execFileAsync('ffmpeg', args, {
+        encoding: 'buffer',
+        killSignal: 'SIGKILL',
+        maxBuffer: 64 * 1024,
+        timeout: 5000,
+      });
+      return stdout.length > 0 ? stdout : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**

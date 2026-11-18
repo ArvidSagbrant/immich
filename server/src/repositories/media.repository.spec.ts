@@ -90,6 +90,17 @@ describe(MediaRepository.name, () => {
     });
   });
 
+  it('decodes a JPEG at the requested video position and returns no image past the end', async () => {
+    const input = fileURLToPath(new URL('../../test/fixtures/chapters/chapters.mp4', import.meta.url));
+    const image = await sut.getVideoPreview(input, 1);
+    expect(image).toBeDefined();
+    const { format, width, height } = await sharp(image!).metadata();
+    expect(format).toBe('jpeg');
+    expect(width).toBeLessThanOrEqual(192);
+    expect(height).toBeLessThanOrEqual(108);
+    await expect(sut.getVideoPreview(input, 10)).resolves.toBeUndefined();
+  });
+
   describe('edit (single actions)', () => {
     it('should apply crop edit correctly', async () => {
       const result = sut['edit'](

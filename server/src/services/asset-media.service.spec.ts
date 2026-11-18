@@ -808,6 +808,7 @@ describe(AssetMediaService.name, () => {
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getForVideo.mockResolvedValue({
         originalPath: asset.originalPath,
+        updatedAt: asset.updatedAt,
         encodedVideoPath: asset.files[0].path,
       });
 
@@ -825,6 +826,7 @@ describe(AssetMediaService.name, () => {
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
       mocks.asset.getForVideo.mockResolvedValue({
         originalPath: asset.originalPath,
+        updatedAt: asset.updatedAt,
         encodedVideoPath: null,
       });
 
@@ -835,6 +837,31 @@ describe(AssetMediaService.name, () => {
           contentType: 'application/octet-stream',
         }),
       );
+    });
+  });
+
+  describe('getVideoPreview', () => {
+    it('checks access even when the requested frame is cached', async () => {
+      const asset = AssetFactory.create({ type: AssetType.Video });
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getForVideo.mockResolvedValue({
+        originalPath: asset.originalPath,
+        updatedAt: asset.updatedAt,
+        encodedVideoPath: null,
+      });
+      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+      mocks.media.getVideoPreview.mockResolvedValue(jpeg);
+
+      await expect(
+        Promise.all([
+          sut.getVideoPreview(authStub.admin, asset.id, 5),
+          sut.getVideoPreview(authStub.admin, asset.id, 5),
+        ]),
+      ).resolves.toEqual([jpeg, jpeg]);
+      expect(mocks.media.getVideoPreview).toHaveBeenCalledExactlyOnceWith(asset.originalPath, 5);
+
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+      await expect(sut.getVideoPreview(authStub.admin, asset.id, 5)).rejects.toBeInstanceOf(BadRequestException);
     });
   });
 

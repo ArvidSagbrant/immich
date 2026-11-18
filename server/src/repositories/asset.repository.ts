@@ -1206,7 +1206,7 @@ export class AssetRepository {
   async getForVideo(id: string) {
     return this.db
       .selectFrom('asset')
-      .select(['asset.originalPath'])
+      .select(['asset.originalPath', 'asset.updatedAt'])
       .select((eb) => withFilePath(eb, AssetFileType.EncodedVideo).as('encodedVideoPath'))
       .where('asset.id', '=', id)
       .where('asset.type', '=', AssetType.Video)

@@ -1,9 +1,10 @@
 import request from 'supertest';
 import { AssetMediaController } from 'src/controllers/asset-media.controller.js';
 import { AssetMediaStatus } from 'src/dtos/asset-media-response.dto.js';
-import { AssetMetadataKey } from 'src/enum.js';
+import { AssetMetadataKey, Permission } from 'src/enum.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { AssetMediaService } from 'src/services/asset-media.service.js';
+import { authStub } from 'test/fixtures/auth.stub.js';
 import { factory } from 'test/small.factory.js';
 import { ControllerContext, automock, controllerSetup, mockBaseService } from 'test/utils.js';
 
@@ -41,6 +42,36 @@ describe(AssetMediaController.name, () => {
     service.uploadAsset.mockResolvedValue({ status: AssetMediaStatus.DUPLICATE, id: factory.uuid() });
 
     ctx.reset();
+  });
+
+  describe('GET /assets/:id/video/preview', () => {
+    it.each(['', '?time=-1', '?time=1.5', '?time=NaN'])('rejects an invalid timestamp: %s', async (query) => {
+      const { status } = await request(ctx.getHttpServer()).get(`/assets/${factory.uuid()}/video/preview${query}`);
+      expect(status).toBe(400);
+      expect(service.getVideoPreview).not.toHaveBeenCalled();
+    });
+
+    it('returns a private JPEG with the same shared-link permissions as video playback', async () => {
+      const id = factory.uuid();
+      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+      ctx.authenticate.mockResolvedValue(authStub.adminSharedLink);
+      service.getVideoPreview.mockResolvedValue(jpeg);
+
+      const { status, headers, body } = await request(ctx.getHttpServer()).get(
+        `/assets/${id}/video/preview?time=5&key=secret`,
+      );
+
+      expect(status).toBe(200);
+      expect(headers['content-type']).toBe('image/jpeg');
+      expect(headers['cache-control']).toBe('private, no-store');
+      expect(body).toEqual(jpeg);
+      expect(service.getVideoPreview).toHaveBeenCalledWith(authStub.adminSharedLink, id, 5);
+      expect(ctx.authenticate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: expect.objectContaining({ permission: Permission.AssetView, sharedLinkRoute: true }),
+        }),
+      );
+    });
   });
 
   describe('POST /assets', () => {

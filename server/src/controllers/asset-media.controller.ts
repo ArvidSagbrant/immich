@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   HttpCode,
   HttpStatus,
   Next,
@@ -11,6 +12,7 @@ import {
   Query,
   Req,
   Res,
+  StreamableFile,
   UploadedFiles,
   UseInterceptors,
 } from '@nestjs/common';
@@ -27,6 +29,7 @@ import {
   AssetMediaCreateDto,
   AssetMediaOptionsDto,
   AssetMediaSize,
+  VideoPreviewOptionsDto,
 } from 'src/dtos/asset-media.dto.js';
 import { AssetDownloadOriginalDto } from 'src/dtos/asset.dto.js';
 import { type AuthDto } from 'src/dtos/auth.dto.js';
@@ -175,6 +178,23 @@ export class AssetMediaController {
     @Next() next: NextFunction,
   ) {
     await sendFile(res, next, () => this.service.playbackVideo(auth, id), this.logger);
+  }
+
+  @Get(':id/video/preview')
+  @FileResponse()
+  @Header('Cache-Control', 'private, no-store')
+  @Authenticated({ permission: Permission.AssetView, sharedLink: true })
+  @Endpoint({
+    summary: 'Preview a video position',
+    description: 'Returns a small JPEG preview of the video at the given timestamp.',
+    history: new HistoryBuilder().added('v3'),
+  })
+  async getAssetVideoPreview(
+    @Auth() auth: AuthDto,
+    @Param() { id }: UUIDParamDto,
+    @Query() { time }: VideoPreviewOptionsDto,
+  ): Promise<StreamableFile> {
+    return new StreamableFile(await this.service.getVideoPreview(auth, id, time), { type: 'image/jpeg' });
   }
 
   @Post('bulk-upload-check')

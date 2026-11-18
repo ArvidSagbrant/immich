@@ -601,6 +601,7 @@ order by
 -- AssetRepository.getForVideo
 select
   "asset"."originalPath",
+  "asset"."updatedAt",
   (
     select
       "asset_file"."path"

@@ -87,6 +87,9 @@ export const getAssetThumbnailPath = (id: string) => `/assets/${id}/thumbnail`;
 export const getAssetPlaybackPath = (id: string) =>
   `/assets/${id}/video/playback`;
 
+export const getAssetVideoPreviewPath = (id: string) =>
+  `/assets/${id}/video/preview`;
+
 export const getUserProfileImagePath = (userId: string) =>
   `/users/${userId}/profile-image`;
 
