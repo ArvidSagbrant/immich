@@ -72,6 +72,7 @@ def resolve(requested, repository):
     build_key = hashlib.sha256(f"{commit}:{recipe}".encode()).hexdigest()
     image = f"ghcr.io/{repository.split('/')[0].lower()}/{RECIPES['image']}"
     patch = ROOT / profile["patch"]
+    flavor = profile.get("flavor", "chapters")
     return {
         "release": tag,
         "upstream": upstream,
@@ -80,8 +81,8 @@ def resolve(requested, repository):
         "recipe_sha": recipe,
         "patch_sha": hashlib.sha256(patch.read_bytes()).hexdigest(),
         "build_key": build_key,
-        "image_ref": f"{image}:{tag}-chapters-{build_key[:12]}",
-        "release_ref": f"{image}:{tag}-chapters",
+        "image_ref": f"{image}:{tag}-{flavor}-{build_key[:12]}",
+        "release_ref": f"{image}:{tag}-{flavor}",
     }
 
 
@@ -96,6 +97,7 @@ def apply(source, plan):
         raise ValueError("Apply chapters to a clean upstream checkout")
     profile = profile_for(plan["release"])
     patch = ROOT / profile["patch"]
+    flavor = profile.get("flavor", "chapters")
     if hashlib.sha256(patch.read_bytes()).hexdigest() != plan["patch_sha"]:
         raise ValueError("The chapter patch changed after the build was resolved")
     try:
@@ -110,7 +112,7 @@ def verification_commands(profile):
         ["//:open-api"],
         ["//web:install"],
         ["//server:check"],
-        ["//server:test", "--run", *BACKEND_TESTS, "--maxWorkers=1"],
+        ["//server:test", "--run", *BACKEND_TESTS, *profile.get("extra_server_tests", []), "--maxWorkers=1"],
         ["//server:test-medium", "--run", "test/medium/specs/services/asset.service.spec.ts", "test/medium/specs/services/metadata.service.spec.ts", "--maxWorkers=1"],
         ["//web:check-typescript"],
         ["//web:check-svelte"],

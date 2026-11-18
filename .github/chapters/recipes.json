@@ -3,19 +3,42 @@
   "profiles": [
     {
       "browser_tests": false,
-      "maximum": [3, 4, 0],
-      "minimum": [3, 3, 0],
+      "maximum": [
+        3,
+        4,
+        0
+      ],
+      "minimum": [
+        3,
+        3,
+        0
+      ],
       "name": "v3.3",
       "patch": "patches/v3.3.patch",
       "tested_base": "587f549f46f1cd1822a06e16dcccecef04ea4565"
     },
     {
       "browser_tests": true,
-      "maximum": [4, 0, 0],
-      "minimum": [3, 4, 0],
+      "extra_server_tests": [
+        "src/controllers/asset-media.controller.spec.ts",
+        "src/services/asset-media.service.spec.ts",
+        "src/services/hls.service.spec.ts",
+        "src/services/transcoding.service.spec.ts"
+      ],
+      "flavor": "player",
+      "maximum": [
+        4,
+        0,
+        0
+      ],
+      "minimum": [
+        3,
+        4,
+        0
+      ],
       "name": "v3.4",
       "patch": "patches/v3.4.patch",
-      "tested_base": "92b529bd88636c2dbc80da7068f124b417a5298c"
+      "tested_base": "22b95194c80a2f2e6201093916b6c8c3d6d271dd"
     }
   ],
   "upstream": "immich-app/immich"

@@ -1,8 +1,8 @@
 diff --git a/i18n/en.json b/i18n/en.json
-index 1a597c14c..8c5a3d904 100644
+index d598a48b8328e24d218d66eb2efe0a40c4d62b3f..a6b7ece6f60237736924dd9286090154ca647d2a 100644
 --- a/i18n/en.json
 +++ b/i18n/en.json
-@@ -2361,6 +2361,8 @@
+@@ -2366,9 +2366,12 @@
    "version_history": "Version History",
    "version_history_item": "Installed {version} on {date}",
    "video": "Video",
@@ -11,8 +11,143 @@ index 1a597c14c..8c5a3d904 100644
    "video_hover_setting": "Play video thumbnail on hover",
    "video_hover_setting_description": "Play video thumbnail when mouse is hovering over item. Even when disabled, playback can be started by hovering over the play icon.",
    "video_quality": "Video quality",
++  "video_quality_original": "Original",
+   "videos": "Videos",
+   "videos_count": "{count, plural, one {# Video} other {# Videos}}",
+   "view": "View",
+diff --git a/packages/sdk/src/index.ts b/packages/sdk/src/index.ts
+index 779376a4fd6836ad3e54f44aeacccf019f9184da..46baeda962e7db0ea08148b41f515b079a6ce0f4 100644
+--- a/packages/sdk/src/index.ts
++++ b/packages/sdk/src/index.ts
+@@ -87,6 +87,9 @@ export const getAssetThumbnailPath = (id: string) => `/assets/${id}/thumbnail`;
+ export const getAssetPlaybackPath = (id: string) =>
+   `/assets/${id}/video/playback`;
+ 
++export const getAssetVideoPreviewPath = (id: string) =>
++  `/assets/${id}/video/preview`;
++
+ export const getUserProfileImagePath = (userId: string) =>
+   `/users/${userId}/profile-image`;
+ 
+diff --git a/server/src/constants.ts b/server/src/constants.ts
+index a0b19d75414fc2f1382d5ae95c500b3fd82a0467..af344f7506ebadad44bc11f8b9d09757b7467b1c 100644
+--- a/server/src/constants.ts
++++ b/server/src/constants.ts
+@@ -260,6 +260,7 @@ export const HLS_VARIANTS = [
+   { resolution: 2160, codec: VideoCodec.Hevc, bitrate: 14_000_000 },
+   { resolution: 2160, codec: VideoCodec.H264, bitrate: 25_000_000 },
+ ];
++export const HLS_ORIGINAL_VARIANT_INDEX = HLS_VARIANTS.length;
+ export const HLS_VERSION = 7;
+ 
+ export type CodecLevel = { maxFrame: number; maxRate: number; token: string };
+diff --git a/server/src/controllers/asset-media.controller.spec.ts b/server/src/controllers/asset-media.controller.spec.ts
+index 8c6304d22facdf5ec3b584bbcffe494c3b6984e4..25602a6734a30b93ab6245034a5a317a87cdf43e 100644
+--- a/server/src/controllers/asset-media.controller.spec.ts
++++ b/server/src/controllers/asset-media.controller.spec.ts
+@@ -1,9 +1,10 @@
+ import request from 'supertest';
+ import { AssetMediaController } from 'src/controllers/asset-media.controller.js';
+ import { AssetMediaStatus } from 'src/dtos/asset-media-response.dto.js';
+-import { AssetMetadataKey } from 'src/enum.js';
++import { AssetMetadataKey, Permission } from 'src/enum.js';
+ import { LoggingRepository } from 'src/repositories/logging.repository.js';
+ import { AssetMediaService } from 'src/services/asset-media.service.js';
++import { authStub } from 'test/fixtures/auth.stub.js';
+ import { factory } from 'test/small.factory.js';
+ import { ControllerContext, automock, controllerSetup, mockBaseService } from 'test/utils.js';
+ 
+@@ -43,6 +44,36 @@ describe(AssetMediaController.name, () => {
+     ctx.reset();
+   });
+ 
++  describe('GET /assets/:id/video/preview', () => {
++    it.each(['', '?time=-1', '?time=1.5', '?time=NaN'])('rejects an invalid timestamp: %s', async (query) => {
++      const { status } = await request(ctx.getHttpServer()).get(`/assets/${factory.uuid()}/video/preview${query}`);
++      expect(status).toBe(400);
++      expect(service.getVideoPreview).not.toHaveBeenCalled();
++    });
++
++    it('returns a private JPEG with the same shared-link permissions as video playback', async () => {
++      const id = factory.uuid();
++      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
++      ctx.authenticate.mockResolvedValue(authStub.adminSharedLink);
++      service.getVideoPreview.mockResolvedValue(jpeg);
++
++      const { status, headers, body } = await request(ctx.getHttpServer()).get(
++        `/assets/${id}/video/preview?time=5&key=secret`,
++      );
++
++      expect(status).toBe(200);
++      expect(headers['content-type']).toBe('image/jpeg');
++      expect(headers['cache-control']).toBe('private, no-store');
++      expect(body).toEqual(jpeg);
++      expect(service.getVideoPreview).toHaveBeenCalledWith(authStub.adminSharedLink, id, 5);
++      expect(ctx.authenticate).toHaveBeenCalledWith(
++        expect.objectContaining({
++          metadata: expect.objectContaining({ permission: Permission.AssetView, sharedLinkRoute: true }),
++        }),
++      );
++    });
++  });
++
+   describe('POST /assets', () => {
+     it('should accept metadata', async () => {
+       const mobileMetadata = { key: AssetMetadataKey.MobileApp, value: { iCloudId: '123' } };
+diff --git a/server/src/controllers/asset-media.controller.ts b/server/src/controllers/asset-media.controller.ts
+index 1646c867e3eb3e559ef0f9d041ce0111f683e039..911987802550c09a6f2b46dd420da033556dcbf0 100644
+--- a/server/src/controllers/asset-media.controller.ts
++++ b/server/src/controllers/asset-media.controller.ts
+@@ -2,6 +2,7 @@ import {
+   Body,
+   Controller,
+   Get,
++  Header,
+   HttpCode,
+   HttpStatus,
+   Next,
+@@ -11,6 +12,7 @@ import {
+   Query,
+   Req,
+   Res,
++  StreamableFile,
+   UploadedFiles,
+   UseInterceptors,
+ } from '@nestjs/common';
+@@ -27,6 +29,7 @@ import {
+   AssetMediaCreateDto,
+   AssetMediaOptionsDto,
+   AssetMediaSize,
++  VideoPreviewOptionsDto,
+ } from 'src/dtos/asset-media.dto.js';
+ import { AssetDownloadOriginalDto } from 'src/dtos/asset.dto.js';
+ import { type AuthDto } from 'src/dtos/auth.dto.js';
+@@ -177,6 +180,23 @@ export class AssetMediaController {
+     await sendFile(res, next, () => this.service.playbackVideo(auth, id), this.logger);
+   }
+ 
++  @Get(':id/video/preview')
++  @FileResponse()
++  @Header('Cache-Control', 'private, no-store')
++  @Authenticated({ permission: Permission.AssetView, sharedLink: true })
++  @Endpoint({
++    summary: 'Preview a video position',
++    description: 'Returns a small JPEG preview of the video at the given timestamp.',
++    history: new HistoryBuilder().added('v3'),
++  })
++  async getAssetVideoPreview(
++    @Auth() auth: AuthDto,
++    @Param() { id }: UUIDParamDto,
++    @Query() { time }: VideoPreviewOptionsDto,
++  ): Promise<StreamableFile> {
++    return new StreamableFile(await this.service.getVideoPreview(auth, id, time), { type: 'image/jpeg' });
++  }
++
+   @Post('bulk-upload-check')
+   @Authenticated({ permission: Permission.AssetUpload })
+   @Endpoint({
 diff --git a/server/src/controllers/asset.controller.spec.ts b/server/src/controllers/asset.controller.spec.ts
-index c6160f8f5..41b0227d4 100644
+index c6160f8f5468ba46ab59517b421eca45996b06fb..41b0227d422427dcaa61b4a8cc5f795454537af7 100644
 --- a/server/src/controllers/asset.controller.spec.ts
 +++ b/server/src/controllers/asset.controller.spec.ts
 @@ -1,7 +1,8 @@
@@ -70,7 +205,7 @@ index c6160f8f5..41b0227d4 100644
      it('should require target and source id', async () => {
        const { status, body } = await request(ctx.getHttpServer()).put('/assets/copy').send({});
 diff --git a/server/src/controllers/asset.controller.ts b/server/src/controllers/asset.controller.ts
-index 9e670a6d6..89ec2ca93 100644
+index 9e670a6d6fb684cb8f10c941c74feda9c070fef9..89ec2ca938b1bf92dcbd2de3ddbdcb2a5f59c5d9 100644
 --- a/server/src/controllers/asset.controller.ts
 +++ b/server/src/controllers/asset.controller.ts
 @@ -1,6 +1,7 @@
@@ -101,10 +236,10 @@ index 9e670a6d6..89ec2ca93 100644
    @Authenticated({ permission: Permission.AssetRead })
    @Endpoint({
 diff --git a/server/src/controllers/index.spec.ts b/server/src/controllers/index.spec.ts
-index 2817fa825..38059be71 100644
+index 2817fa825c74d235dbc6196c23a83735f3134809..bbb2f80bc41f3f22c7515668ce425ce539d2006e 100644
 --- a/server/src/controllers/index.spec.ts
 +++ b/server/src/controllers/index.spec.ts
-@@ -49,6 +49,7 @@ const SHARED_LINK_ROUTES = new Set([
+@@ -49,9 +49,11 @@ const SHARED_LINK_ROUTES = new Set([
    'GET albums/:id',
    'GET albums/:id/map-markers',
    'GET assets/:id',
@@ -112,8 +247,44 @@ index 2817fa825..38059be71 100644
    'GET assets/:id/original',
    'GET assets/:id/thumbnail',
    'GET assets/:id/video/playback',
++  'GET assets/:id/video/preview',
+   'GET assets/:id/video/stream/:sessionId/:variantIndex/:filename',
+   'GET assets/:id/video/stream/:sessionId/:variantIndex/playlist.m3u8',
+   'GET assets/:id/video/stream/main.m3u8',
+diff --git a/server/src/dtos/asset-chapters.dto.ts b/server/src/dtos/asset-chapters.dto.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef310dd3f4148cab04fa22ab431bb3a92e609ba1
+--- /dev/null
++++ b/server/src/dtos/asset-chapters.dto.ts
+@@ -0,0 +1,13 @@
++import { createZodDto } from 'nestjs-zod';
++import z from 'zod';
++
++export const AssetChapterSchema = z
++  .object({
++    startTime: z.number().nonnegative().meta({ format: 'double' }).describe('Chapter start time in seconds'),
++    endTime: z.number().positive().meta({ format: 'double' }).describe('Chapter end time in seconds'),
++    title: z.string().nullable().describe('Embedded chapter title, if present'),
++  })
++  .refine(({ startTime, endTime }) => endTime > startTime)
++  .meta({ id: 'AssetChapterResponseDto' });
++
++export class AssetChapterResponseDto extends createZodDto(AssetChapterSchema) {}
+diff --git a/server/src/dtos/asset-media.dto.ts b/server/src/dtos/asset-media.dto.ts
+index d8289e70a0aa2207cc57fc707be14e7f3715be8f..28d304130efd046979eeb2eaf1bf16d97ae24114 100644
+--- a/server/src/dtos/asset-media.dto.ts
++++ b/server/src/dtos/asset-media.dto.ts
+@@ -77,5 +77,8 @@ const AssetBulkUploadCheckSchema = z
+   .meta({ id: 'AssetBulkUploadCheckDto' });
+ 
+ export class AssetMediaOptionsDto extends createZodDto(AssetMediaOptionsSchema) {}
++export class VideoPreviewOptionsDto extends createZodDto(
++  z.object({ time: z.coerce.number().int().min(0).max(2_147_483_647).describe('Timestamp in whole seconds') }),
++) {}
+ export class AssetMediaCreateDto extends createZodDto(AssetMediaCreateSchema) {}
+ export class AssetBulkUploadCheckDto extends createZodDto(AssetBulkUploadCheckSchema) {}
 diff --git a/server/src/dtos/asset.dto.ts b/server/src/dtos/asset.dto.ts
-index bcdb19372..3a841ebf7 100644
+index bcdb1937235d938cee62a0032d35d65f9d312f05..3a841ebf7594e500b534918cbcc526a53c9e5174 100644
 --- a/server/src/dtos/asset.dto.ts
 +++ b/server/src/dtos/asset.dto.ts
 @@ -2,7 +2,7 @@ import { createZodDto } from 'nestjs-zod';
@@ -151,7 +322,7 @@ index bcdb19372..3a841ebf7 100644
    })
    .meta({ id: 'AssetMetadataBulkUpsertItemDto' });
 diff --git a/server/src/enum.ts b/server/src/enum.ts
-index 8b7c8ab44..04b9da268 100644
+index de6307e9064b5f02d599a1d80d80ce84bb1af7fb..3c7e17b898a22d5af75f08327c99cd440eb51432 100644
 --- a/server/src/enum.ts
 +++ b/server/src/enum.ts
 @@ -407,6 +407,7 @@ export const UserMetadataKeySchema = z
@@ -162,8 +333,105 @@ index 8b7c8ab44..04b9da268 100644
  }
  
  export enum UserAvatarColor {
+diff --git a/server/src/queries/asset.repository.sql b/server/src/queries/asset.repository.sql
+index c9391ffd58e85b473ec4220977fc9235e7c790e4..74d418039b2f8231ea7d307cb1c833846fdac827 100644
+--- a/server/src/queries/asset.repository.sql
++++ b/server/src/queries/asset.repository.sql
+@@ -601,6 +601,7 @@ order by
+ -- AssetRepository.getForVideo
+ select
+   "asset"."originalPath",
++  "asset"."updatedAt",
+   (
+     select
+       "asset_file"."path"
+diff --git a/server/src/queries/video.stream.repository.sql b/server/src/queries/video.stream.repository.sql
+index 714e138ce8573e981bf932e2316df7d3e957e7cd..2ab6ce24f28cf71746631bbb399303a85dc4b894 100644
+--- a/server/src/queries/video.stream.repository.sql
++++ b/server/src/queries/video.stream.repository.sql
+@@ -50,6 +50,25 @@ where
+ 
+ -- VideoStreamRepository.getForMainPlaylist
+ select
++  (
++    select
++      to_json(obj)
++    from
++      (
++        select
++          "asset_audio"."index",
++          "asset_audio"."codecName",
++          "asset_audio"."profile",
++          "asset_audio"."bitrate"
++        from
++          (
++            select
++              1
++          ) as "dummy"
++        where
++          "asset_audio"."assetId" is not null
++      ) as obj
++  ) as "audioStream",
+   (
+     select
+       to_json(obj)
+@@ -112,6 +131,7 @@ select
+ from
+   "asset"
+   inner join "asset_exif" on "asset"."id" = "asset_exif"."assetId"
++  left join "asset_audio" on "asset"."id" = "asset_audio"."assetId"
+   inner join "asset_video" on "asset"."id" = "asset_video"."assetId"
+   inner join "asset_keyframe" on "asset"."id" = "asset_keyframe"."assetId"
+ where
+@@ -119,6 +139,25 @@ where
+ 
+ -- VideoStreamRepository.getForMediaPlaylist
+ select
++  (
++    select
++      to_json(obj)
++    from
++      (
++        select
++          "asset_audio"."index",
++          "asset_audio"."codecName",
++          "asset_audio"."profile",
++          "asset_audio"."bitrate"
++        from
++          (
++            select
++              1
++          ) as "dummy"
++        where
++          "asset_audio"."assetId" is not null
++      ) as obj
++  ) as "audioStream",
+   (
+     select
+       to_json(obj)
+@@ -182,6 +221,7 @@ from
+   "asset"
+   inner join "asset_exif" on "asset"."id" = "asset_exif"."assetId"
+   inner join "video_stream_session" on "asset"."id" = "video_stream_session"."assetId"
++  left join "asset_audio" on "asset"."id" = "asset_audio"."assetId"
+   inner join "asset_video" on "asset"."id" = "asset_video"."assetId"
+   inner join "asset_keyframe" on "asset"."id" = "asset_keyframe"."assetId"
+ where
+diff --git a/server/src/repositories/asset.repository.ts b/server/src/repositories/asset.repository.ts
+index 6bf649b5c5a7f1a446a7ecad42729c70f4fdf71e..bb2e682bcb18dd49de3e6b1960f35c83f369dfb3 100644
+--- a/server/src/repositories/asset.repository.ts
++++ b/server/src/repositories/asset.repository.ts
+@@ -1206,7 +1206,7 @@ export class AssetRepository {
+   async getForVideo(id: string) {
+     return this.db
+       .selectFrom('asset')
+-      .select(['asset.originalPath'])
++      .select(['asset.originalPath', 'asset.updatedAt'])
+       .select((eb) => withFilePath(eb, AssetFileType.EncodedVideo).as('encodedVideoPath'))
+       .where('asset.id', '=', id)
+       .where('asset.type', '=', AssetType.Video)
 diff --git a/server/src/repositories/media.repository.spec.ts b/server/src/repositories/media.repository.spec.ts
-index 02f413b3f..e5431f2a4 100644
+index 02f413b3fbc1658c64bb2120c68970d393dade91..9c1627350f4c30f63e086b83f9c29bc01723b2fc 100644
 --- a/server/src/repositories/media.repository.spec.ts
 +++ b/server/src/repositories/media.repository.spec.ts
 @@ -1,6 +1,7 @@
@@ -174,7 +442,7 @@ index 02f413b3f..e5431f2a4 100644
  import sharp from 'sharp';
  import { AssetEditAction, MirrorAxis } from 'src/dtos/editing.dto.js';
  import { Colorspace, ImageFormat } from 'src/enum.js';
-@@ -68,6 +69,27 @@ describe(MediaRepository.name, () => {
+@@ -68,6 +69,38 @@ describe(MediaRepository.name, () => {
      sut = new MediaRepository(automock(LoggingRepository, { args: [, { getEnv: () => ({}) }], strict: false }));
    });
  
@@ -199,14 +467,37 @@ index 02f413b3f..e5431f2a4 100644
 +    });
 +  });
 +
++  it('decodes a JPEG at the requested video position and returns no image past the end', async () => {
++    const input = fileURLToPath(new URL('../../test/fixtures/chapters/chapters.mp4', import.meta.url));
++    const image = await sut.getVideoPreview(input, 1);
++    expect(image).toBeDefined();
++    const { format, width, height } = await sharp(image!).metadata();
++    expect(format).toBe('jpeg');
++    expect(width).toBeLessThanOrEqual(192);
++    expect(height).toBeLessThanOrEqual(108);
++    await expect(sut.getVideoPreview(input, 10)).resolves.toBeUndefined();
++  });
++
    describe('edit (single actions)', () => {
      it('should apply crop edit correctly', async () => {
        const result = sut['edit'](
 diff --git a/server/src/repositories/media.repository.ts b/server/src/repositories/media.repository.ts
-index 9f847a147..f842e636d 100644
+index 9f847a147c3c476794310c6e973f56fdcb620835..465cd6d6616ffe04d3bcc885178661e48808a969 100644
 --- a/server/src/repositories/media.repository.ts
 +++ b/server/src/repositories/media.repository.ts
-@@ -37,6 +37,7 @@ import type {
+@@ -3,9 +3,10 @@ import { ExifDateTime, WriteTags, exiftool } from 'exiftool-vendored';
+ import ffmpeg, { FfprobeData, FfprobeStream } from 'fluent-ffmpeg';
+ import { camelCase, upperFirst } from 'lodash-es';
+ import { Duration } from 'luxon';
+-import { spawn } from 'node:child_process';
++import { execFile, spawn } from 'node:child_process';
+ import fs from 'node:fs/promises';
+ import { Writable } from 'node:stream';
++import { promisify } from 'node:util';
+ import sharp, { Sharp } from 'sharp';
+ import { ORIENTATION_TO_SHARP_ROTATION } from 'src/constants.js';
+ import { Exif } from 'src/database.js';
+@@ -37,6 +38,7 @@ import type {
    VideoInfo,
    VideoPacketInfo,
  } from 'src/types.js';
@@ -214,7 +505,65 @@ index 9f847a147..f842e636d 100644
  import { handlePromiseError } from 'src/utils/misc.js';
  import { createAffineMatrix } from 'src/utils/transform.js';
  
-@@ -254,8 +255,9 @@ export class MediaRepository {
+@@ -47,6 +49,7 @@ const probe = (input: string, options: string[]): Promise<FfprobeData> =>
+   );
+ 
+ const pascalCase = (str: string) => upperFirst(camelCase(str.toLowerCase()));
++const execFileAsync = promisify(execFile);
+ 
+ type ProgressEvent = {
+   frames: number;
+@@ -72,6 +75,49 @@ export class MediaRepository {
+     sharp.cache({ files: 0 });
+   }
+ 
++  async getVideoPreview(input: string, time: number): Promise<Buffer | undefined> {
++    const args = [
++      '-nostdin',
++      '-v',
++      'error',
++      '-protocol_whitelist',
++      'file',
++      '-filter_threads',
++      '1',
++      '-threads',
++      '2',
++      '-ss',
++      String(time),
++      '-i',
++      input,
++      '-map',
++      '0:V:0',
++      '-vf',
++      'scale=192:108:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1',
++      '-frames:v',
++      '1',
++      '-c:v',
++      'mjpeg',
++      '-threads',
++      '1',
++      '-f',
++      'image2pipe',
++      'pipe:1',
++    ];
++
++    try {
++      const { stdout } = await execFileAsync('ffmpeg', args, {
++        encoding: 'buffer',
++        killSignal: 'SIGKILL',
++        maxBuffer: 64 * 1024,
++        timeout: 5000,
++      });
++      return stdout.length > 0 ? stdout : undefined;
++    } catch {
++      return undefined;
++    }
++  }
++
+   /**
+   
+   @param input file path to the input image
+@@ -254,8 +300,9 @@ export class MediaRepository {
    }
  
    async probe(input: string, options?: ProbeOptions): Promise<VideoInfo> {
@@ -225,8 +574,161 @@ index 9f847a147..f842e636d 100644
        format: {
          formatName: results.format.format_name,
          formatLongName: results.format.format_long_name,
+diff --git a/server/src/repositories/video-stream.repository.ts b/server/src/repositories/video-stream.repository.ts
+index 1681562ea911e3a9d4cc661e9cbae497f86b7242..78ae1b1d2bfa1c3ec61ea8b613afcebdc50aa716 100644
+--- a/server/src/repositories/video-stream.repository.ts
++++ b/server/src/repositories/video-stream.repository.ts
+@@ -77,8 +77,10 @@ export class VideoStreamRepository {
+       .selectFrom('asset')
+       .innerJoin('asset_exif', 'asset.id', 'asset_exif.assetId')
+       .where('asset.id', '=', id)
++      .leftJoin('asset_audio', 'asset.id', 'asset_audio.assetId')
+       .innerJoin('asset_video', 'asset.id', 'asset_video.assetId')
+       .innerJoin('asset_keyframe', 'asset.id', 'asset_keyframe.assetId')
++      .select((eb) => withAudioStream(eb).as('audioStream'))
+       .select((eb) => withVideoStream(eb).$notNull().as('videoStream'))
+       .select((eb) => withVideoPackets(eb).$notNull().as('packets'))
+       .executeTakeFirst();
+@@ -93,8 +95,10 @@ export class VideoStreamRepository {
+       .where('asset.id', '=', id)
+       .where('video_stream_session.id', '=', sessionId)
+       .where('video_stream_session.expiresAt', '>', new Date())
++      .leftJoin('asset_audio', 'asset.id', 'asset_audio.assetId')
+       .innerJoin('asset_video', 'asset.id', 'asset_video.assetId')
+       .innerJoin('asset_keyframe', 'asset.id', 'asset_keyframe.assetId')
++      .select((eb) => withAudioStream(eb).as('audioStream'))
+       .select((eb) => withVideoStream(eb).$notNull().as('videoStream'))
+       .select((eb) => withVideoPackets(eb).$notNull().as('packets'))
+       .executeTakeFirst();
+diff --git a/server/src/services/asset-media.service.spec.ts b/server/src/services/asset-media.service.spec.ts
+index 1df6dc1a9e48414099bdf5e378224f3d89d80c6f..51c78983425ba50fe40c8a91c431c79029025170 100644
+--- a/server/src/services/asset-media.service.spec.ts
++++ b/server/src/services/asset-media.service.spec.ts
+@@ -808,6 +808,7 @@ describe(AssetMediaService.name, () => {
+       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
+       mocks.asset.getForVideo.mockResolvedValue({
+         originalPath: asset.originalPath,
++        updatedAt: asset.updatedAt,
+         encodedVideoPath: asset.files[0].path,
+       });
+ 
+@@ -825,6 +826,7 @@ describe(AssetMediaService.name, () => {
+       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
+       mocks.asset.getForVideo.mockResolvedValue({
+         originalPath: asset.originalPath,
++        updatedAt: asset.updatedAt,
+         encodedVideoPath: null,
+       });
+ 
+@@ -838,6 +840,31 @@ describe(AssetMediaService.name, () => {
+     });
+   });
+ 
++  describe('getVideoPreview', () => {
++    it('checks access even when the requested frame is cached', async () => {
++      const asset = AssetFactory.create({ type: AssetType.Video });
++      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
++      mocks.asset.getForVideo.mockResolvedValue({
++        originalPath: asset.originalPath,
++        updatedAt: asset.updatedAt,
++        encodedVideoPath: null,
++      });
++      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
++      mocks.media.getVideoPreview.mockResolvedValue(jpeg);
++
++      await expect(
++        Promise.all([
++          sut.getVideoPreview(authStub.admin, asset.id, 5),
++          sut.getVideoPreview(authStub.admin, asset.id, 5),
++        ]),
++      ).resolves.toEqual([jpeg, jpeg]);
++      expect(mocks.media.getVideoPreview).toHaveBeenCalledExactlyOnceWith(asset.originalPath, 5);
++
++      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
++      await expect(sut.getVideoPreview(authStub.admin, asset.id, 5)).rejects.toBeInstanceOf(BadRequestException);
++    });
++  });
++
+   describe('bulkUploadCheck', () => {
+     it('should accept hex and base64 checksums', async () => {
+       const file1 = Buffer.from('d2947b871a706081be194569951b7db246907957', 'hex');
+diff --git a/server/src/services/asset-media.service.ts b/server/src/services/asset-media.service.ts
+index 15d356492b677a4e8770280a45c1d89869d7fa49..1eaa984933748bd1d450bcec56bbdef5915a0a92 100644
+--- a/server/src/services/asset-media.service.ts
++++ b/server/src/services/asset-media.service.ts
+@@ -1,4 +1,10 @@
+-import { BadRequestException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
++import {
++  BadRequestException,
++  Injectable,
++  InternalServerErrorException,
++  NotFoundException,
++  ServiceUnavailableException,
++} from '@nestjs/common';
+ import sanitize from 'sanitize-filename';
+ import { StorageCore } from 'src/cores/storage.core.js';
+ import { Asset, AuthSharedLink } from 'src/database.js';
+@@ -41,8 +47,14 @@ export interface AssetMediaRedirectResponse {
+   targetSize: AssetMediaSize | 'original';
+ }
+ 
++const MAX_CACHED_VIDEO_PREVIEWS = 128;
++const MAX_ACTIVE_VIDEO_PREVIEWS = 2;
++
+ @Injectable()
+ export class AssetMediaService extends BaseService {
++  private readonly videoPreviews = new Map<string, Buffer>();
++  private readonly activeVideoPreviews = new Map<string, Promise<Buffer>>();
++
+   async getUploadAssetIdByChecksum(auth: AuthDto, checksum?: string): Promise<AssetMediaResponseDto | undefined> {
+     if (!checksum) {
+       return;
+@@ -318,6 +330,43 @@ export class AssetMediaService extends BaseService {
+     });
+   }
+ 
++  async getVideoPreview(auth: AuthDto, id: string, time: number): Promise<Buffer> {
++    await this.requireAccess({ auth, permission: Permission.AssetView, ids: [id] });
++    const asset = await this.assetRepository.getForVideo(id);
++    if (!asset) {
++      throw new NotFoundException('Asset not found or asset is not a video');
++    }
++
++    const key = `${id}:${asset.updatedAt.toISOString()}:${time}`;
++    const cached = this.videoPreviews.get(key);
++    if (cached) {
++      return cached;
++    }
++    const active = this.activeVideoPreviews.get(key);
++    if (active) {
++      return active;
++    }
++    if (this.activeVideoPreviews.size >= MAX_ACTIVE_VIDEO_PREVIEWS) {
++      throw new ServiceUnavailableException('Video preview workers are busy');
++    }
++
++    const preview = this.mediaRepository
++      .getVideoPreview(asset.originalPath, time)
++      .then((image) => {
++        if (!image) {
++          throw new NotFoundException('Video frame is not available');
++        }
++        this.videoPreviews.set(key, image);
++        if (this.videoPreviews.size > MAX_CACHED_VIDEO_PREVIEWS) {
++          this.videoPreviews.delete(this.videoPreviews.keys().next().value!);
++        }
++        return image;
++      })
++      .finally(() => this.activeVideoPreviews.delete(key));
++    this.activeVideoPreviews.set(key, preview);
++    return preview;
++  }
++
+   async bulkUploadCheck(auth: AuthDto, dto: AssetBulkUploadCheckDto): Promise<AssetBulkUploadCheckResponseDto> {
+     const checksums: Buffer[] = dto.assets.map((asset) => fromChecksum(asset.checksum));
+     const results = await this.assetRepository.getByChecksums(auth.user.id, checksums);
 diff --git a/server/src/services/asset.service.spec.ts b/server/src/services/asset.service.spec.ts
-index a30753fbd..218e4b0c2 100755
+index a30753fbd354b2e674ad2ecf314e8ecd2f5b79b1..218e4b0c20619f740c0321f8eb7595b16b818571 100755
 --- a/server/src/services/asset.service.spec.ts
 +++ b/server/src/services/asset.service.spec.ts
 @@ -683,6 +683,87 @@ describe(AssetService.name, () => {
@@ -318,7 +820,7 @@ index a30753fbd..218e4b0c2 100755
      it('should require asset read permission', async () => {
        mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
 diff --git a/server/src/services/asset.service.ts b/server/src/services/asset.service.ts
-index e53d20f64..28a06c780 100644
+index e53d20f64788619a0fd2ff4d0c95d93f0315e717..28a06c780bb01c1d84a93bfb2fcc8e4c9dba8764 100644
 --- a/server/src/services/asset.service.ts
 +++ b/server/src/services/asset.service.ts
 @@ -3,6 +3,7 @@ import { isUndefined, omitBy } from 'lodash-es';
@@ -392,8 +894,379 @@ index e53d20f64..28a06c780 100644
    async run(auth: AuthDto, dto: AssetJobsDto) {
      await this.requireAccess({ auth, permission: Permission.AssetUpdate, ids: dto.assetIds });
  
+diff --git a/server/src/services/hls.service.spec.ts b/server/src/services/hls.service.spec.ts
+index f0ac7fcb6a6a2d49fe685a8b13b60b8c26db2421..9e2f35237f19f1e8c28e9ea16627f4a16a04f2f4 100644
+--- a/server/src/services/hls.service.spec.ts
++++ b/server/src/services/hls.service.spec.ts
+@@ -1,5 +1,6 @@
+ import { BadRequestException, NotFoundException } from '@nestjs/common';
+-import { HlsVideoResolution, VideoCodec } from 'src/enum.js';
++import { HLS_ORIGINAL_VARIANT_INDEX } from 'src/constants.js';
++import { Av1Profile, ColorTransfer, HlsVideoResolution, VideoCodec } from 'src/enum.js';
+ import { HlsService } from 'src/services/hls.service.js';
+ import { eiffelTower, train, waterfall } from 'test/fixtures/media.stub.js';
+ import { factory } from 'test/small.factory.js';
+@@ -171,6 +172,70 @@ ${sessionId}/13/playlist.m3u8
+ ${sessionId}/14/playlist.m3u8
+ `;
+ 
++const eiffelOriginalStream = `#EXT-X-STREAM-INF:BANDWIDTH=5779676,RESOLUTION=1080x1920,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=SDR,FRAME-RATE=24.910,STABLE-VARIANT-ID="original"
++${sessionId}/${HLS_ORIGINAL_VARIANT_INDEX}/playlist.m3u8
++`;
++
++const waterfallOriginalStream = `#EXT-X-STREAM-INF:BANDWIDTH=47910915,RESOLUTION=2160x3840,CODECS="hvc1.1.6.L156.B0,mp4a.40.2",VIDEO-RANGE=SDR,FRAME-RATE=29.830,STABLE-VARIANT-ID="original"
++${sessionId}/${HLS_ORIGINAL_VARIANT_INDEX}/playlist.m3u8
++`;
++
++const eiffelExpectedOriginalPlaylist = `#EXTM3U
++#EXT-X-VERSION:7
++#EXT-X-INDEPENDENT-SEGMENTS
++#EXT-X-TARGETDURATION:5
++#EXT-X-MEDIA-SEQUENCE:0
++#EXT-X-PLAYLIST-TYPE:VOD
++#EXT-X-MAP:URI="init.mp4"
++#EXTINF:5.138911,
++seg_0.m4s
++#EXTINF:5.138911,
++seg_1.m4s
++#EXTINF:3.171667,
++seg_2.m4s
++#EXTINF:1.967244,
++seg_3.m4s
++#EXTINF:1.726356,
++seg_4.m4s
++#EXTINF:3.412556,
++seg_5.m4s
++#EXTINF:1.806500,
++seg_6.m4s
++#EXT-X-ENDLIST
++`;
++
++const waterfallExpectedOriginalPlaylist = `#EXTM3U
++#EXT-X-VERSION:7
++#EXT-X-INDEPENDENT-SEGMENTS
++#EXT-X-TARGETDURATION:1
++#EXT-X-MEDIA-SEQUENCE:0
++#EXT-X-PLAYLIST-TYPE:VOD
++#EXT-X-MAP:URI="init.mp4"
++#EXTINF:0.999856,
++seg_0.m4s
++#EXTINF:0.999856,
++seg_1.m4s
++#EXTINF:0.999856,
++seg_2.m4s
++#EXTINF:0.999856,
++seg_3.m4s
++#EXTINF:0.999867,
++seg_4.m4s
++#EXTINF:0.999856,
++seg_5.m4s
++#EXTINF:0.999856,
++seg_6.m4s
++#EXTINF:1.058400,
++seg_7.m4s
++#EXTINF:1.001189,
++seg_8.m4s
++#EXTINF:1.000244,
++seg_9.m4s
++#EXTINF:0.299878,
++seg_10.m4s
++#EXT-X-ENDLIST
++`;
++
+ describe(HlsService.name, () => {
+   let sut: HlsService;
+   let mocks: ServiceMocks;
+@@ -193,7 +258,7 @@ describe(HlsService.name, () => {
+     ];
+ 
+     const setup = (
+-      asset: typeof eiffelTower | typeof waterfall,
++      asset: NonNullable<Awaited<ReturnType<typeof mocks.videoStream.getForMainPlaylist>>>,
+       videoCodecs?: VideoCodec[],
+       resolutions?: HlsVideoResolution[],
+     ) => {
+@@ -215,17 +280,79 @@ describe(HlsService.name, () => {
+ 
+     it('offers AV1, HEVC, and H.264 when AV1 is configured and the accelerator supports it', async () => {
+       setup(eiffelTower, allCodecs);
+-      await expect(sut.getMainPlaylist(auth, assetId)).resolves.toBe(eiffelExpectedMasterAv1);
++      await expect(sut.getMainPlaylist(auth, assetId)).resolves.toBe(eiffelExpectedMasterAv1 + eiffelOriginalStream);
+     });
+ 
+     it('omits AV1 when it is not in the configured codecs', async () => {
+       setup(eiffelTower);
+-      await expect(sut.getMainPlaylist(auth, assetId)).resolves.toBe(eiffelExpectedMasterNoAv1);
++      await expect(sut.getMainPlaylist(auth, assetId)).resolves.toBe(eiffelExpectedMasterNoAv1 + eiffelOriginalStream);
+     });
+ 
+     it('offers every resolution up to the source and derives 4K codec levels (waterfall, 4K, 29.83fps)', async () => {
+       setup(waterfall, allCodecs, allResolutions);
+-      await expect(sut.getMainPlaylist(auth, assetId)).resolves.toBe(waterfallExpectedMasterAv1);
++      await expect(sut.getMainPlaylist(auth, assetId)).resolves.toBe(
++        waterfallExpectedMasterAv1 + waterfallOriginalStream,
++      );
++    });
++
++    it('offers Original when no encoded rendition is configured', async () => {
++      setup(eiffelTower, [], []);
++      await expect(sut.getMainPlaylist(auth, assetId)).resolves.toBe(`#EXTM3U
++#EXT-X-VERSION:7
++#EXT-X-INDEPENDENT-SEGMENTS
++${eiffelOriginalStream}`);
++    });
++
++    it('describes HDR10 Original', async () => {
++      setup({
++        ...waterfall,
++        videoStream: { ...waterfall.videoStream, colorTransfer: ColorTransfer.Smpte2084 },
++      });
++
++      await expect(sut.getMainPlaylist(auth, assetId)).resolves.toContain('VIDEO-RANGE=PQ');
++    });
++
++    it('describes AV1 Original', async () => {
++      setup({
++        ...eiffelTower,
++        videoStream: {
++          ...eiffelTower.videoStream,
++          codecName: VideoCodec.Av1,
++          profile: Av1Profile.Main,
++          level: 8,
++          pixelFormat: 'yuv420p10le',
++        },
++      });
++
++      await expect(sut.getMainPlaylist(auth, assetId)).resolves.toContain(
++        'CODECS="av01.0.08M.10,mp4a.40.2",VIDEO-RANGE=SDR',
++      );
++    });
++
++    it('describes Dolby Vision Original', async () => {
++      setup(train);
++
++      await expect(sut.getMainPlaylist(auth, assetId)).resolves.toContain(
++        'CODECS="hvc1.2.4.L123.B0,mp4a.40.2",SUPPLEMENTAL-CODECS="dvh1.08.05/db4h",VIDEO-RANGE=HLG',
++      );
++    });
++
++    it('omits Original when the stream does not start with a keyframe', async () => {
++      const asset = {
++        ...eiffelTower,
++        packets: {
++          ...eiffelTower.packets,
++          keyframeAccDuration: [
++            eiffelTower.packets.keyframeAccDuration[0] + 1,
++            ...eiffelTower.packets.keyframeAccDuration.slice(1),
++          ],
++        },
++      };
++      setup(asset, allCodecs, allResolutions);
++
++      const playlist = await sut.getMainPlaylist(auth, assetId);
++      expect(playlist).toContain('#EXT-X-INDEPENDENT-SEGMENTS');
++      expect(playlist).not.toContain('STABLE-VARIANT-ID="original"');
+     });
+ 
+     it('throws BadRequestException when realtime transcoding is disabled', async () => {
+@@ -256,6 +383,50 @@ describe(HlsService.name, () => {
+       await expect(sut.getMediaPlaylist(auth, assetId, sessionId, 0)).resolves.toBe(playlist);
+     });
+ 
++    const originalFixtures = [
++      { data: eiffelTower, playlist: eiffelExpectedOriginalPlaylist },
++      { data: waterfall, playlist: waterfallExpectedOriginalPlaylist },
++    ];
++
++    it.each(originalFixtures)(
++      'matches FFmpeg for the Original stream from $data.originalPath',
++      async ({ data, playlist }) => {
++        mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
++        mocks.videoStream.getForMediaPlaylist.mockResolvedValue(data);
++        await expect(sut.getMediaPlaylist(auth, assetId, sessionId, HLS_ORIGINAL_VARIANT_INDEX)).resolves.toBe(
++          playlist,
++        );
++      },
++    );
++
++    it('prewarms Original at the keyframe segment containing the hinted position', async () => {
++      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
++      mocks.videoStream.getForMediaPlaylist.mockResolvedValue(eiffelTower);
++      await sut.getMediaPlaylist(auth, assetId, sessionId, HLS_ORIGINAL_VARIANT_INDEX, 10.5);
++      expect(mocks.websocket.serverSend).toHaveBeenCalledWith('HlsSegmentRequest', {
++        sessionId,
++        assetId,
++        variantIndex: HLS_ORIGINAL_VARIANT_INDEX,
++        segmentIndex: 2,
++      });
++    });
++
++    it('does not carry segment numbers over between Original and encoded variants', async () => {
++      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
++      mocks.videoStream.getSession.mockResolvedValue({ id: sessionId, assetId } as never);
++      mocks.storage.checkFileExists.mockResolvedValue(true);
++      await sut.getSegment(auth, assetId, sessionId, 1, 'seg_5.m4s');
++      mocks.videoStream.getForMediaPlaylist.mockResolvedValue(eiffelTower);
++      await sut.getMediaPlaylist(auth, assetId, sessionId, HLS_ORIGINAL_VARIANT_INDEX);
++      expect(mocks.websocket.serverSend).not.toHaveBeenCalledWith('HlsSegmentRequest', expect.anything());
++      await sut.getSegment(auth, assetId, sessionId, HLS_ORIGINAL_VARIANT_INDEX, 'init.mp4');
++      expect(mocks.websocket.serverSend).toHaveBeenLastCalledWith('HlsHeartbeat', {
++        sessionId,
++        variantIndex: HLS_ORIGINAL_VARIANT_INDEX,
++        segmentIndex: 0,
++      });
++    });
++
+     it('throws NotFoundException when the session/asset cannot be loaded', async () => {
+       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
+       await expect(sut.getMediaPlaylist(auth, assetId, sessionId, 0)).rejects.toBeInstanceOf(NotFoundException);
+diff --git a/server/src/services/hls.service.ts b/server/src/services/hls.service.ts
+index 5282947cc05ae114a13b4c2b4a6d19f17df18696..eb93eb63a5666e5a75bbeb672dd4763ab5f74f51 100644
+--- a/server/src/services/hls.service.ts
++++ b/server/src/services/hls.service.ts
+@@ -1,7 +1,13 @@
+ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+ import { constants } from 'node:fs';
+ import { join } from 'node:path';
+-import { HLS_SEGMENT_DURATION, HLS_SEGMENT_FILENAME_REGEX, HLS_VARIANTS, HLS_VERSION } from 'src/constants.js';
++import {
++  HLS_ORIGINAL_VARIANT_INDEX,
++  HLS_SEGMENT_DURATION,
++  HLS_SEGMENT_FILENAME_REGEX,
++  HLS_VARIANTS,
++  HLS_VERSION,
++} from 'src/constants.js';
+ import { StorageCore } from 'src/cores/storage.core.js';
+ import { OnEvent } from 'src/decorators.js';
+ import { AuthDto } from 'src/dtos/auth.dto.js';
+@@ -9,12 +15,17 @@ import { ConfigFFmpegDto } from 'src/dtos/config.dto.js';
+ import { CacheControl, ImmichWorker, Permission } from 'src/enum.js';
+ import type { ArgOf } from 'src/repositories/event.repository.js';
+ import { BaseService } from 'src/services/base.service.js';
+-import type { VideoPacketInfo, VideoStreamInfo } from 'src/types.js';
++import type { AudioStreamInfo, VideoPacketInfo, VideoStreamInfo } from 'src/types.js';
+ import { PendingEvents } from 'src/utils/event.js';
+ import { ImmichFileResponse } from 'src/utils/file.js';
++import { getHlsOriginalStream } from 'src/utils/hls.js';
+ import { getCodecString, getOutputSize } from 'src/utils/media.js';
+ 
+-type AssetWithStreamInfo = { videoStream: VideoStreamInfo & { timeBase: number }; packets: VideoPacketInfo };
++type AssetWithStreamInfo = {
++  audioStream: AudioStreamInfo | null;
++  packets: VideoPacketInfo;
++  videoStream: VideoStreamInfo & { timeBase: number };
++};
+ type Segmentation = { fps: number; framesPerSegment: number; segmentCount: number; segmentDuration: number };
+ type ApiSession = { lastRequestedSegment: number | null; lastVariantIndex: number | null };
+ 
+@@ -76,6 +87,17 @@ export class HlsService extends BaseService {
+       throw new NotFoundException('Asset not found or metadata not yet ready for streaming');
+     }
+ 
++    if (variantIndex === HLS_ORIGINAL_VARIANT_INDEX) {
++      const original = getHlsOriginalStream(asset.videoStream, asset.audioStream, asset.packets);
++      if (!original) {
++        throw new NotFoundException('Original stream is not available for this asset');
++      }
++      const hintedSegment =
++        position === undefined ? undefined : this.originalPositionToSegmentIndex(original.durations, position);
++      this.prewarmVariant(assetId, sessionId, variantIndex, hintedSegment);
++      return this.formatMediaPlaylist(original.targetDuration, original.durations);
++    }
++
+     const segmentation = this.getSegmentation(asset);
+     const hintedSegment = position === undefined ? undefined : this.positionToSegmentIndex(segmentation, position);
+     this.prewarmVariant(assetId, sessionId, variantIndex, hintedSegment);
+@@ -145,6 +167,17 @@ export class HlsService extends BaseService {
+         `${sessionId}/${i}/playlist.m3u8`,
+       );
+     }
++    const original = getHlsOriginalStream(asset.videoStream, asset.audioStream, asset.packets);
++    if (original) {
++      const { width, height } = getOutputSize(asset.videoStream, sourceResolution);
++      const supplementalCodecs = original.supplementalCodecs
++        ? `,SUPPLEMENTAL-CODECS="${original.supplementalCodecs}"`
++        : '';
++      lines.push(
++        `#EXT-X-STREAM-INF:BANDWIDTH=${Math.round(original.bitrate * 1.1)},RESOLUTION=${width}x${height},CODECS="${original.codecs}"${supplementalCodecs},VIDEO-RANGE=${original.videoRange},FRAME-RATE=${roundedFps},STABLE-VARIANT-ID="original"`,
++        `${sessionId}/${HLS_ORIGINAL_VARIANT_INDEX}/playlist.m3u8`,
++      );
++    }
+     lines.push('');
+ 
+     if (lines.length === 4) {
+@@ -165,25 +198,41 @@ export class HlsService extends BaseService {
+     return Math.min(Math.max(Math.floor(position / segmentDuration), 0), segmentCount - 1);
+   }
+ 
++  private originalPositionToSegmentIndex(durations: number[], position: number) {
++    let end = 0;
++    for (const [index, duration] of durations.entries()) {
++      end += duration;
++      if (position < end) {
++        return index;
++      }
++    }
++    return durations.length - 1;
++  }
++
+   private generateMediaPlaylist({ packets }: AssetWithStreamInfo, segmentation: Segmentation) {
+     const { fps, framesPerSegment, segmentCount, segmentDuration: fullSegmentDuration } = segmentation;
+     const lastSegmentFrames = packets.outputFrames - framesPerSegment * (segmentCount - 1);
+     const lastSegmentDuration = lastSegmentFrames / fps;
+ 
++    const durations = Array.from({ length: segmentCount - 1 }, () => fullSegmentDuration);
++    return this.formatMediaPlaylist(HLS_SEGMENT_DURATION, [...durations, lastSegmentDuration]);
++  }
++
++  private formatMediaPlaylist(targetDuration: number, durations: number[]) {
+     const lines = [
+       '#EXTM3U',
+       `#EXT-X-VERSION:${HLS_VERSION}`,
+       '#EXT-X-INDEPENDENT-SEGMENTS',
+-      `#EXT-X-TARGETDURATION:${HLS_SEGMENT_DURATION}`,
++      `#EXT-X-TARGETDURATION:${targetDuration}`,
+       '#EXT-X-MEDIA-SEQUENCE:0',
+       '#EXT-X-PLAYLIST-TYPE:VOD',
+       '#EXT-X-MAP:URI="init.mp4"',
+     ];
+ 
+-    for (let i = 0; i < segmentCount - 1; i++) {
+-      lines.push(`#EXTINF:${fullSegmentDuration.toFixed(6)},`, `seg_${i}.m4s`);
++    for (const [index, duration] of durations.entries()) {
++      lines.push(`#EXTINF:${duration.toFixed(6)},`, `seg_${index}.m4s`);
+     }
+-    lines.push(`#EXTINF:${lastSegmentDuration.toFixed(6)},`, `seg_${segmentCount - 1}.m4s`, '#EXT-X-ENDLIST', '');
++    lines.push('#EXT-X-ENDLIST', '');
+ 
+     return lines.join('\n');
+   }
+@@ -194,7 +243,12 @@ export class HlsService extends BaseService {
+       return;
+     }
+ 
+-    const nextSegment = session && session.lastRequestedSegment !== null ? session.lastRequestedSegment + 1 : undefined;
++    const hasMatchingSegments =
++      (session?.lastVariantIndex === HLS_ORIGINAL_VARIANT_INDEX) === (variantIndex === HLS_ORIGINAL_VARIANT_INDEX);
++    const nextSegment =
++      hasMatchingSegments && session && session.lastRequestedSegment !== null
++        ? session.lastRequestedSegment + 1
++        : undefined;
+     const segmentIndex = hintedSegment ?? nextSegment;
+     if (segmentIndex !== undefined) {
+       this.websocketRepository.serverSend('HlsSegmentRequest', { sessionId, assetId, variantIndex, segmentIndex });
+@@ -228,6 +282,9 @@ export class HlsService extends BaseService {
+ 
+     if (session.lastVariantIndex !== null && session.lastVariantIndex !== variantIndex) {
+       this.pendingSegments.rejectByPrefix(`${id}:${session.lastVariantIndex}:`, 'Variant changed');
++      if ((session.lastVariantIndex === HLS_ORIGINAL_VARIANT_INDEX) !== (variantIndex === HLS_ORIGINAL_VARIANT_INDEX)) {
++        session.lastRequestedSegment = null;
++      }
+     }
+     session.lastVariantIndex = variantIndex;
+     return session;
 diff --git a/server/src/services/metadata.service.spec.ts b/server/src/services/metadata.service.spec.ts
-index 255889eae..f07d082e1 100644
+index 255889eae6c895a5516ed619b576cec041d28f97..f07d082e18a0dc2753f4bf9fadfe20b6a27b0358 100644
 --- a/server/src/services/metadata.service.spec.ts
 +++ b/server/src/services/metadata.service.spec.ts
 @@ -7,6 +7,7 @@ import { StorageCore, ThumbnailPathEntity } from 'src/cores/storage.core.js';
@@ -449,7 +1322,7 @@ index 255889eae..f07d082e1 100644
        mocks.assetJob.getForMetadataExtraction.mockResolvedValue(void 0);
  
 diff --git a/server/src/services/metadata.service.ts b/server/src/services/metadata.service.ts
-index 1e968eda8..0e1e51112 100644
+index 1e968eda86b78ed8f1f61c518109d83d99df3d03..0e1e51112b359f56a453d739c8b95d228f73191b 100644
 --- a/server/src/services/metadata.service.ts
 +++ b/server/src/services/metadata.service.ts
 @@ -11,6 +11,7 @@ import { Asset, AssetFile } from 'src/database.js';
@@ -508,8 +1381,235 @@ index 1e968eda8..0e1e51112 100644
    }
  
    private getHeifOrientation(exifTags: ImmichTags): ExifOrientation | null {
+diff --git a/server/src/services/transcoding.service.spec.ts b/server/src/services/transcoding.service.spec.ts
+index c4dd79d14f57e935e55e2c6e491f19417cada7ef..fd6986dcee11a357c640924f2400dd07c1470b27 100644
+--- a/server/src/services/transcoding.service.spec.ts
++++ b/server/src/services/transcoding.service.spec.ts
+@@ -5,7 +5,9 @@ import {
+   HLS_CLEANUP_INTERVAL_MS,
+   HLS_INACTIVITY_TIMEOUT_MS,
+   HLS_LEASE_DURATION_MS,
++  HLS_ORIGINAL_VARIANT_INDEX,
+ } from 'src/constants.js';
++import { DvProfile, DvSignalCompatibility } from 'src/enum.js';
+ import { TranscodingService } from 'src/services/transcoding.service.js';
+ import { VIDEO_STREAM_SESSION_PK_CONSTRAINT } from 'src/utils/database.js';
+ import { eiffelTower, train, waterfall } from 'test/fixtures/media.stub.js';
+@@ -486,6 +488,79 @@ describe(TranscodingService.name, () => {
+ 
+       expect(mocks.process.spawn.mock.calls[0][1].toSorted()).toEqual(expected);
+     });
++
++    it('copies H.264 and AAC into keyframe-aligned fMP4 segments for the original variant', async () => {
++      mocks.process.spawn.mockReturnValue(mockSpawn(0, '', ''));
++
++      await sut.onSessionRequest({ sessionId, assetId, ownerId });
++      await sut.onSegmentRequest({
++        sessionId,
++        assetId,
++        variantIndex: HLS_ORIGINAL_VARIANT_INDEX,
++        segmentIndex: 0,
++      });
++
++      const args = mocks.process.spawn.mock.calls[0][1];
++      expect(args).toEqual(
++        expect.arrayContaining([
++          '-i',
++          'eiffel-tower.mp4',
++          '-c:v',
++          'copy',
++          '-c:a',
++          'copy',
++          '-hls_time',
++          '0',
++          '-hls_segment_type',
++          'fmp4',
++          '-hls_fmp4_init_filename',
++          'init.mp4',
++          '-hls_segment_filename',
++          `/data/encoded-video/user-1/se/ss/session-1/${HLS_ORIGINAL_VARIANT_INDEX}/seg_%d.m4s`,
++        ]),
++      );
++      expect(args).not.toContain('-ss');
++      expect(args).not.toContain('-r');
++      expect(args).not.toContain('-ac');
++    });
++
++    it('lets a running Original stream reach a later segment instead of restarting it', async () => {
++      const process = mockSpawn(0, '', '');
++      mocks.process.spawn.mockReturnValue(process);
++
++      await sut.onSessionRequest({ sessionId, assetId, ownerId });
++      await sut.onSegmentRequest({ sessionId, assetId, variantIndex: HLS_ORIGINAL_VARIANT_INDEX, segmentIndex: 0 });
++      completeSegment(0);
++      await sut.onSegmentRequest({ sessionId, assetId, variantIndex: HLS_ORIGINAL_VARIANT_INDEX, segmentIndex: 6 });
++
++      expect(mocks.process.spawn).toHaveBeenCalledTimes(1);
++      expect(process.kill).not.toHaveBeenCalled();
++    });
++
++    it.each([
++      { name: 'HEVC', asset: waterfall, tags: ['-tag:v', 'hvc1'] },
++      { name: 'Dolby Vision', asset: train, tags: ['-strict', 'unofficial', '-tag:v', 'hvc1'] },
++      {
++        name: 'Dolby Vision without a compatible base layer',
++        asset: {
++          ...train,
++          videoStream: {
++            ...train.videoStream,
++            dvProfile: DvProfile.Dvhe05,
++            dvBlSignalCompatibilityId: DvSignalCompatibility.None,
++          },
++        },
++        tags: ['-strict', 'unofficial', '-tag:v', 'dvh1'],
++      },
++    ])('tags $name so browsers can decode the original variant', async ({ asset, tags }) => {
++      mocks.videoStream.getForTranscoding.mockResolvedValue(asset);
++      mocks.process.spawn.mockReturnValue(mockSpawn(0, '', ''));
++
++      await sut.onSessionRequest({ sessionId, assetId, ownerId });
++      await sut.onSegmentRequest({ sessionId, assetId, variantIndex: HLS_ORIGINAL_VARIANT_INDEX, segmentIndex: 0 });
++
++      expect(mocks.process.spawn.mock.calls[0][1].join(' ')).toContain(tags.join(' '));
++    });
+   });
+ 
+   describe('FFmpeg seek per segment', () => {
+diff --git a/server/src/services/transcoding.service.ts b/server/src/services/transcoding.service.ts
+index b0f0c7fa85343c15a43e61a531d86ef03506e893..2b39872bae378f09167a304fa89d23ff28fb0b3d 100644
+--- a/server/src/services/transcoding.service.ts
++++ b/server/src/services/transcoding.service.ts
+@@ -8,17 +8,27 @@ import {
+   HLS_CRF,
+   HLS_INACTIVITY_TIMEOUT_MS,
+   HLS_LEASE_DURATION_MS,
++  HLS_ORIGINAL_VARIANT_INDEX,
+   HLS_SEGMENT_DURATION,
+   HLS_SEGMENT_FILENAME_REGEX,
+   HLS_VARIANTS,
+ } from 'src/constants.js';
+ import { StorageCore } from 'src/cores/storage.core.js';
+ import { OnEvent, OnJob } from 'src/decorators.js';
+-import { DatabaseLock, ImmichWorker, JobName, QueueName, TranscodeTarget } from 'src/enum.js';
++import {
++  AudioCodec,
++  DatabaseLock,
++  ImmichWorker,
++  JobName,
++  QueueName,
++  TranscodeHardwareAcceleration,
++  TranscodeTarget,
++} from 'src/enum.js';
+ import type { ArgOf } from 'src/repositories/event.repository.js';
+ import { BaseService } from 'src/services/base.service.js';
+ import type { VideoInterfaces } from 'src/types.js';
+ import { isVideoStreamSessionPkConstraint } from 'src/utils/database.js';
++import { getHlsOriginalStream } from 'src/utils/hls.js';
+ import { BaseConfig } from 'src/utils/media.js';
+ 
+ type Session = {
+@@ -137,15 +147,18 @@ export class TranscodingService extends BaseService {
+       return;
+     }
+ 
++    const isOriginal = variantIndex === HLS_ORIGINAL_VARIANT_INDEX;
++    const startSegment = isOriginal ? 0 : segmentIndex;
+     session.variantIndex ??= variantIndex;
+-    session.startSegment ??= segmentIndex;
++    session.startSegment ??= startSegment;
+     const curSegment = session.lastCompletedSegment === null ? session.startSegment : session.lastCompletedSegment + 1;
+     const isNeedsRestart =
+-      session.variantIndex !== variantIndex || segmentIndex < session.startSegment || segmentIndex > curSegment + 1;
++      session.variantIndex !== variantIndex ||
++      (!isOriginal && (segmentIndex < session.startSegment || segmentIndex > curSegment + 1));
+     if (isNeedsRestart) {
+       this.stopTranscode(session);
+       session.variantIndex = variantIndex;
+-      session.startSegment = segmentIndex;
++      session.startSegment = startSegment;
+     } else if (session.process) {
+       this.resumeTranscode(session);
+       return;
+@@ -156,7 +169,7 @@ export class TranscodingService extends BaseService {
+ 
+     session.starting = true;
+     try {
+-      const process = await this.startTranscode(session, variantIndex, segmentIndex);
++      const process = await this.startTranscode(session, variantIndex, startSegment);
+       if (process) {
+         session.process = process;
+       }
+@@ -191,8 +204,16 @@ export class TranscodingService extends BaseService {
+       return;
+     }
+ 
++    const isOriginal = variantIndex === HLS_ORIGINAL_VARIANT_INDEX;
++    const original = isOriginal ? getHlsOriginalStream(asset.videoStream, asset.audioStream, asset.packets) : null;
++    if (isOriginal && !original) {
++      this.logger.error(`Original stream is not available for asset ${session.assetId}`);
++      await this.failSession(session, 'Original stream is not available for this asset');
++      return;
++    }
++
+     const variant = HLS_VARIANTS[variantIndex];
+-    if (!variant) {
++    if (!isOriginal && !variant) {
+       this.logger.error(`Variant ${variantIndex} out of range for asset ${session.assetId}`);
+       await this.failSession(session, `Invalid variant index ${variantIndex}`);
+       return;
+@@ -213,18 +234,29 @@ export class TranscodingService extends BaseService {
+     const fps = (asset.packets.packetCount * asset.videoStream.timeBase) / asset.packets.totalDuration;
+     const gop = Math.ceil(HLS_SEGMENT_DURATION * fps);
+     const seekSeconds = startSegment > 0 ? (startSegment * gop - 0.5) / fps : 0;
++    const target = variant
++      ? TranscodeTarget.All
++      : asset.audioStream && asset.audioStream.codecName !== AudioCodec.Aac
++        ? TranscodeTarget.Audio
++        : TranscodeTarget.None;
+ 
+     let config;
+     try {
+       config = BaseConfig.create(
+-        {
+-          ...ffmpeg,
+-          targetVideoCodec: variant.codec,
+-          targetResolution: String(variant.resolution),
+-          maxBitrate: `${Math.round(variant.bitrate / 1000)}k`,
+-          gopSize: gop,
+-          crf: HLS_CRF[variant.codec],
+-        },
++        variant
++          ? {
++              ...ffmpeg,
++              targetVideoCodec: variant.codec,
++              targetResolution: String(variant.resolution),
++              maxBitrate: `${Math.round(variant.bitrate / 1000)}k`,
++              gopSize: gop,
++              crf: HLS_CRF[variant.codec],
++            }
++          : {
++              ...ffmpeg,
++              accel: TranscodeHardwareAcceleration.Disabled,
++              targetAudioCodec: AudioCodec.Aac,
++            },
+         this.videoInterfaces,
+         { strictGop: true, lowLatency: true },
+       );
+@@ -242,10 +274,10 @@ export class TranscodingService extends BaseService {
+         packetCount: asset.packets.packetCount,
+         playlistFilename: join(variantDir, 'playlist.m3u8'),
+         seekSeconds,
+-        segmentDuration: HLS_SEGMENT_DURATION,
++        segmentDuration: variant ? HLS_SEGMENT_DURATION : 0,
+         segmentFilename: join(variantDir, 'seg_%d.m4s'),
+         startSegment,
+-        target: TranscodeTarget.All,
++        target,
+         timeBase: asset.videoStream.timeBase,
+         totalDuration: asset.packets.totalDuration,
+       },
 diff --git a/server/src/types.ts b/server/src/types.ts
-index d6310dc40..b37aacae5 100644
+index d6310dc4040cd300d8d4541a5cc4a23c5d5aa029..b37aacae539589b410408008fe164d8d3381b259 100644
 --- a/server/src/types.ts
 +++ b/server/src/types.ts
 @@ -3,6 +3,7 @@ import { ShallowDehydrateObject } from 'kysely';
@@ -528,294 +1628,9 @@ index d6310dc40..b37aacae5 100644
  }
  
  export interface TranscodeCommand {
-diff --git a/server/test/fixtures/media.stub.ts b/server/test/fixtures/media.stub.ts
-index efbb3e4e9..907a884b9 100644
---- a/server/test/fixtures/media.stub.ts
-+++ b/server/test/fixtures/media.stub.ts
-@@ -43,6 +43,7 @@ const probeStubDefaultVideoStream: VideoStreamInfo[] = [
- const probeStubDefaultAudioStream: AudioStreamInfo[] = [{ index: 3, codecName: 'mp3', bitrate: 100, profile: null }];
- 
- const probeStubDefault: VideoInfo = {
-+  chapters: [],
-   format: probeStubDefaultFormat,
-   videoStreams: probeStubDefaultVideoStream,
-   audioStreams: probeStubDefaultAudioStream,
-diff --git a/server/test/medium/specs/services/asset.service.spec.ts b/server/test/medium/specs/services/asset.service.spec.ts
-index 858c62044..5bb0e1d88 100644
---- a/server/test/medium/specs/services/asset.service.spec.ts
-+++ b/server/test/medium/specs/services/asset.service.spec.ts
-@@ -46,6 +46,39 @@ beforeAll(async () => {
- });
- 
- describe(AssetService.name, () => {
-+  describe('getChapters', () => {
-+    it.each([SharedLinkType.Individual, SharedLinkType.Album])(
-+      'limits %s shared-link chapter access to its assets',
-+      async (type) => {
-+        const { sut, ctx } = setup();
-+        const { user } = await ctx.newUser();
-+        const { user: otherUser } = await ctx.newUser();
-+        const { asset } = await ctx.newAsset({ ownerId: user.id });
-+        const { asset: unshared } = await ctx.newAsset({ ownerId: user.id });
-+        const chapters = [{ startTime: 0, endTime: 5, title: 'Intro' }];
-+        await ctx.newMetadata({ assetId: asset.id, key: AssetMetadataKey.VideoChapters, value: { chapters } });
-+        await ctx.newMetadata({ assetId: unshared.id, key: AssetMetadataKey.VideoChapters, value: { chapters } });
-+        const { album } = await ctx.newAlbum({ ownerId: user.id }, [asset.id]);
-+        const sharedLink = await ctx.get(SharedLinkRepository).create({
-+          userId: user.id,
-+          key: Buffer.from(factory.uuid()),
-+          type,
-+          allowUpload: false,
-+          allowDownload: false,
-+          showExif: false,
-+          ...(type === SharedLinkType.Album ? { albumId: album.id } : { assetIds: [asset.id] }),
-+        });
-+        const auth = factory.auth({ user: { id: user.id }, sharedLink });
-+        await expect(sut.getChapters(auth, asset.id)).resolves.toEqual(chapters);
-+        await expect(sut.getChapters(auth, unshared.id)).rejects.toThrow('Not found or no asset.read access');
-+        await expect(sut.getChapters(factory.auth({ user: otherUser }), asset.id)).rejects.toThrow(
-+          'Not found or no asset.read access',
-+        );
-+        await expect(sut.getChapters(factory.auth({ user }), asset.id)).resolves.toEqual(chapters);
-+      },
-+    );
-+  });
-+
-   describe('get', () => {
-     it('should not return an asset of another user', async () => {
-       const { sut, ctx } = setup();
-diff --git a/server/test/medium/specs/services/metadata.service.spec.ts b/server/test/medium/specs/services/metadata.service.spec.ts
-index 68452cd54..d863fbbff 100644
---- a/server/test/medium/specs/services/metadata.service.spec.ts
-+++ b/server/test/medium/specs/services/metadata.service.spec.ts
-@@ -1,13 +1,16 @@
- import { Kysely } from 'kysely';
- import { Stats } from 'node:fs';
--import { mkdtempDisposable, writeFile } from 'node:fs/promises';
-+import { mkdtempDisposable, readFile, writeFile } from 'node:fs/promises';
- import { tmpdir } from 'node:os';
- import { join } from 'node:path';
-+import { fileURLToPath } from 'node:url';
-+import { AssetMetadataKey, AssetType } from 'src/enum.js';
- import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
- import { AssetRepository } from 'src/repositories/asset.repository.js';
- import { ConfigRepository } from 'src/repositories/config.repository.js';
- import { EventRepository } from 'src/repositories/event.repository.js';
- import { LoggingRepository } from 'src/repositories/logging.repository.js';
-+import { MediaRepository } from 'src/repositories/media.repository.js';
- import { MetadataRepository } from 'src/repositories/metadata.repository.js';
- import { StorageRepository } from 'src/repositories/storage.repository.js';
- import { SystemMetadataRepository } from 'src/repositories/system-metadata.repository.js';
-@@ -31,7 +34,7 @@ type TimeZoneTest = {
- let defaultDatabase: Kysely<DB>;
- 
- // eslint-disable-next-line unicorn/no-unnecessary-parameters
--const setup = (db?: Kysely<DB>, { realStorage = false } = {}) => {
-+const setup = (db?: Kysely<DB>, { realStorage = false, realMedia = false } = {}) => {
-   const { sut, ctx } = newMediumService(MetadataService, {
-     database: db || defaultDatabase,
-     real: [
-@@ -41,6 +44,7 @@ const setup = (db?: Kysely<DB>, { realStorage = false } = {}) => {
-       MetadataRepository,
-       SystemMetadataRepository,
-       TagRepository,
-+      ...(realMedia ? [MediaRepository] : []),
-       ...(realStorage ? [StorageRepository] : []),
-     ],
-     mock: [EventRepository, LoggingRepository, ...(realStorage ? [] : [StorageRepository])],
-@@ -81,6 +85,38 @@ describe(MetadataService.name, () => {
-     expect(sut).toBeDefined();
-   });
- 
-+  it('extracts and replaces persisted video chapters without changing the original file', async () => {
-+    const { sut, ctx } = setup(undefined, { realStorage: true, realMedia: true });
-+    const originalPath = fileURLToPath(new URL('../../../fixtures/chapters/chapters.mp4', import.meta.url));
-+    const contents = await readFile(originalPath);
-+    const { user } = await ctx.newUser();
-+    const { asset } = await ctx.newAsset({ ownerId: user.id, type: AssetType.Video, originalPath });
-+    ctx.getMock(EventRepository).emit.mockResolvedValue();
-+
-+    await sut.handleMetadataExtraction({ id: asset.id });
-+
-+    const repository = ctx.get(AssetRepository);
-+    await expect(repository.getMetadataByKey(asset.id, AssetMetadataKey.VideoChapters)).resolves.toMatchObject({
-+      value: {
-+        chapters: [
-+          { startTime: 0, endTime: 1, title: 'Intro' },
-+          { startTime: 1, endTime: 2, title: 'Snow = 雪' },
-+          { startTime: 2, endTime: 3, title: null },
-+        ],
-+      },
-+    });
-+    await expect(readFile(originalPath)).resolves.toEqual(contents);
-+
-+    await repository.update({
-+      id: asset.id,
-+      originalPath: fileURLToPath(new URL('../../../fixtures/chapters/no-chapters.mp4', import.meta.url)),
-+    });
-+    await sut.handleMetadataExtraction({ id: asset.id });
-+    await expect(repository.getMetadataByKey(asset.id, AssetMetadataKey.VideoChapters)).resolves.toMatchObject({
-+      value: { chapters: [] },
-+    });
-+  });
-+
-   describe('sidecar metadata extraction', () => {
-     it('should persist metadata read from a discovered XMP sidecar', async () => {
-       await using tempDir = await mkdtempDisposable(join(tmpdir(), 'immich-sidecar-'));
-diff --git a/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte b/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte
-index 6f775e2be..6d0e006bb 100644
---- a/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte
-+++ b/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte
-@@ -1,11 +1,14 @@
- <script lang="ts">
-+  import VideoChapterMenu from '#lib/components/asset-viewer/VideoChapterMenu.svelte';
-   import VideoRemoteViewer from '#lib/components/asset-viewer/VideoRemoteViewer.svelte';
-+  import VideoTimeline from '#lib/components/asset-viewer/VideoTimeline.svelte';
-   import FaceEditor from '#lib/components/asset-viewer/face-editor/FaceEditor.svelte';
-   import { assetViewerFadeDuration } from '#lib/constants.ts';
-   import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
-   import { authManager } from '#lib/managers/auth-manager.svelte.ts';
-   import { castManager } from '#lib/managers/cast-manager.svelte.ts';
-   import { mediaCapabilitiesManager } from '#lib/managers/media-capabilities-manager.svelte.ts';
-+  import { getAssetChaptersQuery } from '#lib/queries/asset.query.ts';
-   import { createPreloadedQuery } from '#lib/queries/client.ts';
-   import { getPublicConfigQuery } from '#lib/queries/config-public.query.ts';
-   import { autoPlayVideo, lang, loopVideo as loopVideoPreference } from '#lib/stores/preferences.store.ts';
-@@ -25,6 +28,7 @@
-     mdiVolumeMedium,
-     mdiVolumeMute,
-   } from '@mdi/js';
-+  import { createQuery } from '@tanstack/svelte-query';
-   import 'hls-video-element';
-   import type HlsVideoElement from 'hls-video-element';
-   import Hls, { AbrController, Events, type FragLoadedData, type FragLoadingData, type HlsConfig } from 'hls.js';
-@@ -45,7 +49,6 @@
-   import { useSwipe, type SwipeCustomEvent } from 'svelte-gestures';
-   import { t } from 'svelte-i18n';
-   import { fade } from 'svelte/transition';
--  import './immich-time-range';
- 
-   const query = createPreloadedQuery(getPublicConfigQuery);
-   const publicConfig = $derived(query.data);
-@@ -79,6 +82,20 @@
-   }: Props = $props();
- 
-   let videoPlayer: HTMLVideoElement | undefined = $state();
-+  const chaptersQuery = createQuery(() => getAssetChaptersQuery(assetId, cacheKey));
-+  const chapters = $derived(chaptersQuery.data ?? []);
-+  let currentTime = $state(0);
-+  let duration = $state(0);
-+
-+  const onTimeUpdate = () => {
-+    currentTime = videoPlayer?.currentTime ?? 0;
-+  };
-+
-+  const onLoadedMetadata = () => {
-+    hasLoadedMetadata = true;
-+    duration = videoPlayer?.duration ?? 0;
-+    onTimeUpdate();
-+  };
-   let isLoading = $state(true);
-   let hasLoadedMetadata = $state(false);
-   let assetFileUrl = $derived.by(() => {
-@@ -247,6 +264,8 @@
-   $effect(() => {
-     // reactive on `assetFileUrl` changes
-     hasLoadedMetadata = false;
-+    currentTime = 0;
-+    duration = 0;
-     if (videoPlayer && assetFileUrl) {
-       hasFocused = false;
-       rebuildCount = 0;
-@@ -391,7 +410,9 @@
-             {...useSwipe(onSwipe)}
-             class="h-full object-contain"
-             oncanplay={(e: Event) => handleCanPlay(e.currentTarget as HTMLVideoElement)}
--            onloadedmetadata={() => (hasLoadedMetadata = true)}
-+            onloadedmetadata={onLoadedMetadata}
-+            ontimeupdate={onTimeUpdate}
-+            ondurationchange={() => (duration = videoPlayer?.duration ?? 0)}
-             onended={onVideoEnded}
-             onseeking={onSeeking}
-             onplaying={(e: Event) => {
-@@ -417,7 +438,9 @@
-             {...useSwipe(onSwipe)}
-             class="h-full object-contain"
-             oncanplay={(e) => handleCanPlay(e.currentTarget)}
--            onloadedmetadata={() => (hasLoadedMetadata = true)}
-+            onloadedmetadata={onLoadedMetadata}
-+            ontimeupdate={onTimeUpdate}
-+            ondurationchange={() => (duration = videoPlayer?.duration ?? 0)}
-             onended={onVideoEnded}
-             onseeking={onSeeking}
-             onplaying={(e) => {
-@@ -470,6 +493,8 @@
- 
-             <span class="grow"></span>
- 
-+            <VideoChapterMenu {chapters} player={videoPlayer} ready={hasLoadedMetadata} {currentTime} />
-+
-             <div
-               class="volume-wrapper shrink-0 rounded-full bg-light-100/0 transition-colors duration-400 hover:bg-light-100"
-             >
-@@ -490,7 +515,7 @@
-               <media-settings-menu-button class="shrink-0 rounded-full p-2 outline-none"></media-settings-menu-button>
-             {/if}
-           </media-control-bar>
--          <immich-time-range class="h-8 w-full rounded-lg px-2 pb-3 outline-none"></immich-time-range>
-+          <VideoTimeline {chapters} {duration} />
-         </div>
-       </media-controller>
- 
-@@ -548,12 +573,12 @@
-     font-variant-numeric: tabular-nums;
-   }
- 
--  immich-time-range,
-+  :global(immich-time-range),
-   media-volume-range {
-     --media-control-hover-background: none;
-   }
- 
--  immich-time-range:hover,
-+  :global(immich-time-range:hover),
-   media-volume-range:hover {
-     --media-range-thumb-opacity: 1;
-   }
-diff --git a/web/test/common/handlers.ts b/web/test/common/handlers.ts
-index 06051f777..72b6cb17e 100644
---- a/web/test/common/handlers.ts
-+++ b/web/test/common/handlers.ts
-@@ -74,6 +74,7 @@ export const createHandlers = (data: MockData): Handlers => {
-     },
-     restoreAssets: ({ body }) => ({ json: { count: data.restoreAssets(body.ids) } }),
-     getAssetOcr: ({ params }) => ({ json: data.getOcr(params.id) }),
-+    getAssetChapters: () => ({ json: [] }),
-     checkBulkUpload: ({ body }) => ({
-       json: { results: body.assets.map(({ id }) => ({ id, action: AssetUploadAction.Accept })) },
-     }),
-diff --git a/server/src/dtos/asset-chapters.dto.ts b/server/src/dtos/asset-chapters.dto.ts
-new file mode 100644
-index 000000000..ef310dd3f
---- /dev/null
-+++ b/server/src/dtos/asset-chapters.dto.ts
-@@ -0,0 +1,13 @@
-+import { createZodDto } from 'nestjs-zod';
-+import z from 'zod';
-+
-+export const AssetChapterSchema = z
-+  .object({
-+    startTime: z.number().nonnegative().meta({ format: 'double' }).describe('Chapter start time in seconds'),
-+    endTime: z.number().positive().meta({ format: 'double' }).describe('Chapter end time in seconds'),
-+    title: z.string().nullable().describe('Embedded chapter title, if present'),
-+  })
-+  .refine(({ startTime, endTime }) => endTime > startTime)
-+  .meta({ id: 'AssetChapterResponseDto' });
-+
-+export class AssetChapterResponseDto extends createZodDto(AssetChapterSchema) {}
 diff --git a/server/src/utils/chapters.spec.ts b/server/src/utils/chapters.spec.ts
 new file mode 100644
-index 000000000..43984490f
+index 0000000000000000000000000000000000000000..43984490fbc8b1ca5c87ee9c996b402d829bbd5e
 --- /dev/null
 +++ b/server/src/utils/chapters.spec.ts
 @@ -0,0 +1,53 @@
@@ -874,7 +1689,7 @@ index 000000000..43984490f
 +});
 diff --git a/server/src/utils/chapters.ts b/server/src/utils/chapters.ts
 new file mode 100644
-index 000000000..871248518
+index 0000000000000000000000000000000000000000..87124851801e13338881d8430bd38b15329d73d5
 --- /dev/null
 +++ b/server/src/utils/chapters.ts
 @@ -0,0 +1,49 @@
@@ -927,9 +1742,258 @@ index 000000000..871248518
 +    .sort((a, b) => a.startTime - b.startTime)
 +    .filter((chapter, index, sorted) => index === 0 || chapter.startTime !== sorted[index - 1].startTime);
 +};
+diff --git a/server/src/utils/hls.ts b/server/src/utils/hls.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a74dcbb58904ae4a9501b8079e6bbe4a3f45d53
+--- /dev/null
++++ b/server/src/utils/hls.ts
+@@ -0,0 +1,114 @@
++import { AacProfile, AudioCodec, ColorTransfer, DvSignalCompatibility, HevcProfile, VideoCodec } from 'src/enum.js';
++import type { AudioStreamInfo, VideoPacketInfo, VideoStreamInfo } from 'src/types.js';
++
++type VideoRange = 'SDR' | 'PQ' | 'HLG';
++
++export type HlsOriginalStream = {
++  bitrate: number;
++  codecs: string;
++  durations: number[];
++  supplementalCodecs?: string;
++  targetDuration: number;
++  videoRange: VideoRange;
++};
++
++const DV_COMPATIBILITY: Partial<Record<DvSignalCompatibility, { brand?: string; videoRange: VideoRange }>> = {
++  [DvSignalCompatibility.Hdr10]: { brand: 'db1p', videoRange: 'PQ' },
++  [DvSignalCompatibility.Sdr709]: { brand: 'db2g', videoRange: 'SDR' },
++  [DvSignalCompatibility.Hlg]: { brand: 'db4h', videoRange: 'HLG' },
++  [DvSignalCompatibility.Sdr2020]: { videoRange: 'SDR' },
++};
++
++const pad2 = (value: number) => value.toString().padStart(2, '0');
++
++const getDolbyVisionCompatibility = (video: VideoStreamInfo) =>
++  video.dvBlSignalCompatibilityId === null ? undefined : DV_COMPATIBILITY[video.dvBlSignalCompatibilityId];
++
++export const isDolbyVisionCompatible = (video: VideoStreamInfo) =>
++  getDolbyVisionCompatibility(video)?.brand !== undefined;
++
++const getBaseCodecString = (video: VideoStreamInfo) => {
++  if (video.profile === null || video.level === null) {
++    return;
++  }
++  switch (video.codecName) {
++    case VideoCodec.H264: {
++      return `avc1.${video.profile.toString(16).padStart(2, '0')}00${video.level.toString(16).padStart(2, '0')}`;
++    }
++    case VideoCodec.Hevc: {
++      const compatibility = video.profile === HevcProfile.Main ? 6 : 1 << video.profile;
++      return `hvc1.${video.profile}.${compatibility.toString(16)}.L${video.level}.B0`;
++    }
++    case VideoCodec.Av1: {
++      const bitDepth = video.pixelFormat.includes('12') ? 12 : video.pixelFormat.includes('10') ? 10 : 8;
++      return `av01.${video.profile}.${pad2(video.level)}M.${pad2(bitDepth)}`;
++    }
++    default: {
++      return;
++    }
++  }
++};
++
++const getVideoCodecStrings = (video: VideoStreamInfo) => {
++  const codecs = getBaseCodecString(video);
++  if (video.codecName !== VideoCodec.Hevc || video.dvProfile === null || video.dvLevel === null) {
++    return codecs ? { codecs } : undefined;
++  }
++  const dolbyVision = `dvh1.${pad2(video.dvProfile)}.${pad2(video.dvLevel)}`;
++  const brand = getDolbyVisionCompatibility(video)?.brand;
++  return codecs && brand ? { codecs, supplementalCodecs: `${dolbyVision}/${brand}` } : { codecs: dolbyVision };
++};
++
++const getAudioCodecString = (audio: AudioStreamInfo | null) =>
++  audio ? `mp4a.40.${audio.codecName === AudioCodec.Aac ? (audio.profile ?? AacProfile.Lc) : AacProfile.Lc}` : '';
++
++const getVideoRange = (video: VideoStreamInfo): VideoRange => {
++  const dolbyVisionRange = getDolbyVisionCompatibility(video)?.videoRange;
++  if (dolbyVisionRange) {
++    return dolbyVisionRange;
++  }
++  if (video.colorTransfer === ColorTransfer.AribStdB67) {
++    return 'HLG';
++  }
++  return video.colorTransfer === ColorTransfer.Smpte2084 || video.dvProfile !== null ? 'PQ' : 'SDR';
++};
++
++export const getHlsOriginalStream = (
++  video: VideoStreamInfo,
++  audio: AudioStreamInfo | null,
++  packets: VideoPacketInfo,
++): HlsOriginalStream | null => {
++  const videoCodecs = getVideoCodecStrings(video);
++  const bitrate = video.bitrate + (audio?.bitrate ?? 0);
++  const { keyframePts, keyframeAccDuration, keyframeOwnDuration, totalDuration } = packets;
++  const timeBase = video.timeBase;
++  if (
++    !videoCodecs ||
++    bitrate <= 0 ||
++    !timeBase ||
++    keyframePts.length === 0 ||
++    keyframeAccDuration[0] !== keyframeOwnDuration[0]
++  ) {
++    return null;
++  }
++
++  const durations = keyframePts.slice(1).map((pts, index) => (pts - keyframePts[index]) / timeBase);
++  durations.push((keyframeOwnDuration[0] + totalDuration - keyframeAccDuration[keyframePts.length - 1]) / timeBase);
++  let longest = 0;
++  for (const duration of durations) {
++    if (!Number.isFinite(duration) || duration <= 0) {
++      return null;
++    }
++    longest = Math.max(longest, duration);
++  }
++
++  const audioCodec = getAudioCodecString(audio);
++  return {
++    bitrate,
++    codecs: audioCodec ? `${videoCodecs.codecs},${audioCodec}` : videoCodecs.codecs,
++    durations,
++    supplementalCodecs: videoCodecs.supplementalCodecs,
++    targetDuration: Math.max(1, Math.round(longest)),
++    videoRange: getVideoRange(video),
++  };
++};
+diff --git a/server/src/utils/media.ts b/server/src/utils/media.ts
+index dfd727565063ff57956bc92bcccfb3415d75323c..e19214e93a1130d4c7dfa624845e644ba3d30e6a 100644
+--- a/server/src/utils/media.ts
++++ b/server/src/utils/media.ts
+@@ -28,6 +28,7 @@ import type {
+   VideoStreamInfo,
+   VideoTuning,
+ } from 'src/types.js';
++import { isDolbyVisionCompatible } from 'src/utils/hls.js';
+ 
+ export const isVideoRotated = (videoStream: VideoStreamInfo): boolean => Math.abs(videoStream.rotation) === 90;
+ 
+@@ -35,6 +36,16 @@ export const isVideoRotated = (videoStream: VideoStreamInfo): boolean => Math.ab
+ export const isVideoVertical = (videoStream: VideoStreamInfo): boolean =>
+   videoStream.height > videoStream.width !== isVideoRotated(videoStream);
+ 
++const getStreamCopyTags = (video: VideoStreamInfo) => {
++  if (video.codecName !== VideoCodec.Hevc) {
++    return [];
++  }
++  if (video.dvProfile === null) {
++    return ['-tag:v', 'hvc1'];
++  }
++  return ['-strict', 'unofficial', '-tag:v', isDolbyVisionCompatible(video) ? 'hvc1' : 'dvh1'];
++};
++
+ export const getOutputSize = (videoStream: VideoStreamInfo, targetRes: number) => {
+   const factor = Math.max(videoStream.height, videoStream.width) / Math.min(videoStream.height, videoStream.width);
+   let larger = Math.round(targetRes * factor);
+@@ -172,22 +183,24 @@ export class BaseConfig implements VideoCodecSWConfig {
+   }
+ 
+   getHlsCommand(options: HlsCommandOptions, video: VideoStreamInfo, audio?: AudioStreamInfo) {
+-    const args: string[] = this.getBaseInputOptions(video);
++    const transcodesVideo = [TranscodeTarget.All, TranscodeTarget.Video].includes(options.target);
++    const args: string[] = transcodesVideo ? this.getBaseInputOptions(video) : [];
+     if (options.seekSeconds) {
+       args.push('-ss', String(options.seekSeconds));
+     }
++    const outputOptions = transcodesVideo
++      ? [
++          ...this.getBaseOutputOptions(options.target, video, audio),
++          ...this.getPresetOptions(),
++          ...this.getBitrateOptions(),
++          ...this.getEncoderOptions(),
++        ]
++      : [...this.getStreamMappingOptions(options.target, video, audio), ...getStreamCopyTags(video)];
++    args.push('-nostdin', '-nostats', '-i', options.inputPath, ...outputOptions, '-copyts');
++    if (transcodesVideo) {
++      args.push('-r', `${options.packetCount * options.timeBase}/${options.totalDuration}`);
++    }
+     args.push(
+-      '-nostdin',
+-      '-nostats',
+-      '-i',
+-      options.inputPath,
+-      ...this.getBaseOutputOptions(options.target, video, audio),
+-      ...this.getPresetOptions(),
+-      ...this.getBitrateOptions(),
+-      ...this.getEncoderOptions(),
+-      '-copyts',
+-      '-r',
+-      `${options.packetCount * options.timeBase}/${options.totalDuration}`,
+       '-avoid_negative_ts',
+       'disabled',
+       '-f',
+@@ -210,7 +223,7 @@ export class BaseConfig implements VideoCodecSWConfig {
+       String(options.startSegment),
+     );
+ 
+-    if ([TranscodeTarget.All, TranscodeTarget.Video].includes(options.target)) {
++    if (transcodesVideo) {
+       const filters = this.getFilterOptions(video);
+       if (filters.length > 0) {
+         args.push('-vf', filters.join(','));
+@@ -226,18 +239,7 @@ export class BaseConfig implements VideoCodecSWConfig {
+   }
+ 
+   getBaseOutputOptions(target: TranscodeTarget, videoStream: VideoStreamInfo, audioStream?: AudioStreamInfo) {
+-    const videoCodec = [TranscodeTarget.All, TranscodeTarget.Video].includes(target) ? this.getVideoCodec() : 'copy';
+-    const audioCodec = [TranscodeTarget.All, TranscodeTarget.Audio].includes(target) ? this.getAudioEncoder() : 'copy';
+-
+-    const options = ['-c:v', videoCodec, '-c:a', audioCodec, '-map', `0:${videoStream.index}`, '-map_metadata', '-1'];
+-    if (audioStream) {
+-      options.push('-map', `0:${audioStream.index}`);
+-      // If there are more than 2 channels sometimes the channel config is broken when re-encoded
+-      // TODO: Store the number of channels in the db and then set it during the transcoding: -channel_layout 5.1
+-      if ([TranscodeTarget.All, TranscodeTarget.Audio].includes(target)) {
+-        options.push('-ac', '2');
+-      }
+-    }
++    const options = this.getStreamMappingOptions(target, videoStream, audioStream);
+     if (this.getBFrames() > -1) {
+       options.push('-bf', String(this.getBFrames()));
+     }
+@@ -251,7 +253,8 @@ export class BaseConfig implements VideoCodecSWConfig {
+       }
+     }
+     const isHvc =
+-      this.config.targetVideoCodec === VideoCodec.Hevc && (videoCodec !== 'copy' || videoStream.codecName === 'hevc');
++      this.config.targetVideoCodec === VideoCodec.Hevc &&
++      ([TranscodeTarget.All, TranscodeTarget.Video].includes(target) || videoStream.codecName === 'hevc');
+     if (isHvc) {
+       options.push('-tag:v', 'hvc1');
+     }
+@@ -259,6 +262,23 @@ export class BaseConfig implements VideoCodecSWConfig {
+     return options;
+   }
+ 
++  getStreamMappingOptions(target: TranscodeTarget, videoStream: VideoStreamInfo, audioStream?: AudioStreamInfo) {
++    const videoCodec = [TranscodeTarget.All, TranscodeTarget.Video].includes(target) ? this.getVideoCodec() : 'copy';
++    const audioCodec = [TranscodeTarget.All, TranscodeTarget.Audio].includes(target) ? this.getAudioEncoder() : 'copy';
++
++    const options = ['-c:v', videoCodec, '-c:a', audioCodec, '-map', `0:${videoStream.index}`, '-map_metadata', '-1'];
++    if (audioStream) {
++      options.push('-map', `0:${audioStream.index}`);
++      // If there are more than 2 channels sometimes the channel config is broken when re-encoded
++      // TODO: Store the number of channels in the db and then set it during the transcoding: -channel_layout 5.1
++      if ([TranscodeTarget.All, TranscodeTarget.Audio].includes(target)) {
++        options.push('-ac', '2');
++      }
++    }
++
++    return options;
++  }
++
+   getEncoderOptions(): string[] {
+     return [];
+   }
 diff --git a/server/test/fixtures/chapters/README.md b/server/test/fixtures/chapters/README.md
 new file mode 100644
-index 000000000..9d2c65c60
+index 0000000000000000000000000000000000000000..9d2c65c606b179af437a58500c35fbf2dcaded12
 --- /dev/null
 +++ b/server/test/fixtures/chapters/README.md
 @@ -0,0 +1,22 @@
@@ -957,7 +2021,7 @@ index 000000000..9d2c65c60
 +and remuxing are test-data preparation, separate from application behavior.
 diff --git a/server/test/fixtures/chapters/chapters.ffmetadata b/server/test/fixtures/chapters/chapters.ffmetadata
 new file mode 100644
-index 000000000..879f88dd5
+index 0000000000000000000000000000000000000000..879f88dd5477c3657bfca37321a8c70e34eacb78
 --- /dev/null
 +++ b/server/test/fixtures/chapters/chapters.ffmetadata
 @@ -0,0 +1,16 @@
@@ -1140,9 +2204,155 @@ Na0RQlg0pl3{|0dK&RGBe
 literal 0
 HcmV?d00001
 
+diff --git a/server/test/fixtures/media.stub.ts b/server/test/fixtures/media.stub.ts
+index efbb3e4e99ab5febe978e29400298c6b855eed8b..907a884b95bc8f49ef9a1b4e91d034eecefd84be 100644
+--- a/server/test/fixtures/media.stub.ts
++++ b/server/test/fixtures/media.stub.ts
+@@ -43,6 +43,7 @@ const probeStubDefaultVideoStream: VideoStreamInfo[] = [
+ const probeStubDefaultAudioStream: AudioStreamInfo[] = [{ index: 3, codecName: 'mp3', bitrate: 100, profile: null }];
+ 
+ const probeStubDefault: VideoInfo = {
++  chapters: [],
+   format: probeStubDefaultFormat,
+   videoStreams: probeStubDefaultVideoStream,
+   audioStreams: probeStubDefaultAudioStream,
+diff --git a/server/test/medium/specs/services/asset.service.spec.ts b/server/test/medium/specs/services/asset.service.spec.ts
+index 858c62044b6c5a104bfb8a89d64975ca6706c7e0..5bb0e1d8860f431caf9c4268b3f707d9395cbc12 100644
+--- a/server/test/medium/specs/services/asset.service.spec.ts
++++ b/server/test/medium/specs/services/asset.service.spec.ts
+@@ -46,6 +46,39 @@ beforeAll(async () => {
+ });
+ 
+ describe(AssetService.name, () => {
++  describe('getChapters', () => {
++    it.each([SharedLinkType.Individual, SharedLinkType.Album])(
++      'limits %s shared-link chapter access to its assets',
++      async (type) => {
++        const { sut, ctx } = setup();
++        const { user } = await ctx.newUser();
++        const { user: otherUser } = await ctx.newUser();
++        const { asset } = await ctx.newAsset({ ownerId: user.id });
++        const { asset: unshared } = await ctx.newAsset({ ownerId: user.id });
++        const chapters = [{ startTime: 0, endTime: 5, title: 'Intro' }];
++        await ctx.newMetadata({ assetId: asset.id, key: AssetMetadataKey.VideoChapters, value: { chapters } });
++        await ctx.newMetadata({ assetId: unshared.id, key: AssetMetadataKey.VideoChapters, value: { chapters } });
++        const { album } = await ctx.newAlbum({ ownerId: user.id }, [asset.id]);
++        const sharedLink = await ctx.get(SharedLinkRepository).create({
++          userId: user.id,
++          key: Buffer.from(factory.uuid()),
++          type,
++          allowUpload: false,
++          allowDownload: false,
++          showExif: false,
++          ...(type === SharedLinkType.Album ? { albumId: album.id } : { assetIds: [asset.id] }),
++        });
++        const auth = factory.auth({ user: { id: user.id }, sharedLink });
++        await expect(sut.getChapters(auth, asset.id)).resolves.toEqual(chapters);
++        await expect(sut.getChapters(auth, unshared.id)).rejects.toThrow('Not found or no asset.read access');
++        await expect(sut.getChapters(factory.auth({ user: otherUser }), asset.id)).rejects.toThrow(
++          'Not found or no asset.read access',
++        );
++        await expect(sut.getChapters(factory.auth({ user }), asset.id)).resolves.toEqual(chapters);
++      },
++    );
++  });
++
+   describe('get', () => {
+     it('should not return an asset of another user', async () => {
+       const { sut, ctx } = setup();
+diff --git a/server/test/medium/specs/services/metadata.service.spec.ts b/server/test/medium/specs/services/metadata.service.spec.ts
+index 68452cd543700af5f9209c38ac152f4f7a32e4a6..d863fbbff393413c86e52aa59b1cb0c21eca00fe 100644
+--- a/server/test/medium/specs/services/metadata.service.spec.ts
++++ b/server/test/medium/specs/services/metadata.service.spec.ts
+@@ -1,13 +1,16 @@
+ import { Kysely } from 'kysely';
+ import { Stats } from 'node:fs';
+-import { mkdtempDisposable, writeFile } from 'node:fs/promises';
++import { mkdtempDisposable, readFile, writeFile } from 'node:fs/promises';
+ import { tmpdir } from 'node:os';
+ import { join } from 'node:path';
++import { fileURLToPath } from 'node:url';
++import { AssetMetadataKey, AssetType } from 'src/enum.js';
+ import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
+ import { AssetRepository } from 'src/repositories/asset.repository.js';
+ import { ConfigRepository } from 'src/repositories/config.repository.js';
+ import { EventRepository } from 'src/repositories/event.repository.js';
+ import { LoggingRepository } from 'src/repositories/logging.repository.js';
++import { MediaRepository } from 'src/repositories/media.repository.js';
+ import { MetadataRepository } from 'src/repositories/metadata.repository.js';
+ import { StorageRepository } from 'src/repositories/storage.repository.js';
+ import { SystemMetadataRepository } from 'src/repositories/system-metadata.repository.js';
+@@ -31,7 +34,7 @@ type TimeZoneTest = {
+ let defaultDatabase: Kysely<DB>;
+ 
+ // eslint-disable-next-line unicorn/no-unnecessary-parameters
+-const setup = (db?: Kysely<DB>, { realStorage = false } = {}) => {
++const setup = (db?: Kysely<DB>, { realStorage = false, realMedia = false } = {}) => {
+   const { sut, ctx } = newMediumService(MetadataService, {
+     database: db || defaultDatabase,
+     real: [
+@@ -41,6 +44,7 @@ const setup = (db?: Kysely<DB>, { realStorage = false } = {}) => {
+       MetadataRepository,
+       SystemMetadataRepository,
+       TagRepository,
++      ...(realMedia ? [MediaRepository] : []),
+       ...(realStorage ? [StorageRepository] : []),
+     ],
+     mock: [EventRepository, LoggingRepository, ...(realStorage ? [] : [StorageRepository])],
+@@ -81,6 +85,38 @@ describe(MetadataService.name, () => {
+     expect(sut).toBeDefined();
+   });
+ 
++  it('extracts and replaces persisted video chapters without changing the original file', async () => {
++    const { sut, ctx } = setup(undefined, { realStorage: true, realMedia: true });
++    const originalPath = fileURLToPath(new URL('../../../fixtures/chapters/chapters.mp4', import.meta.url));
++    const contents = await readFile(originalPath);
++    const { user } = await ctx.newUser();
++    const { asset } = await ctx.newAsset({ ownerId: user.id, type: AssetType.Video, originalPath });
++    ctx.getMock(EventRepository).emit.mockResolvedValue();
++
++    await sut.handleMetadataExtraction({ id: asset.id });
++
++    const repository = ctx.get(AssetRepository);
++    await expect(repository.getMetadataByKey(asset.id, AssetMetadataKey.VideoChapters)).resolves.toMatchObject({
++      value: {
++        chapters: [
++          { startTime: 0, endTime: 1, title: 'Intro' },
++          { startTime: 1, endTime: 2, title: 'Snow = 雪' },
++          { startTime: 2, endTime: 3, title: null },
++        ],
++      },
++    });
++    await expect(readFile(originalPath)).resolves.toEqual(contents);
++
++    await repository.update({
++      id: asset.id,
++      originalPath: fileURLToPath(new URL('../../../fixtures/chapters/no-chapters.mp4', import.meta.url)),
++    });
++    await sut.handleMetadataExtraction({ id: asset.id });
++    await expect(repository.getMetadataByKey(asset.id, AssetMetadataKey.VideoChapters)).resolves.toMatchObject({
++      value: { chapters: [] },
++    });
++  });
++
+   describe('sidecar metadata extraction', () => {
+     it('should persist metadata read from a discovered XMP sidecar', async () => {
+       await using tempDir = await mkdtempDisposable(join(tmpdir(), 'immich-sidecar-'));
+diff --git a/server/test/repositories/media.repository.mock.ts b/server/test/repositories/media.repository.mock.ts
+index e63d8c054a6d297f16cc43cbf65c8026695199a7..08adddd60a13dea8a11f030306ba612529418734 100644
+--- a/server/test/repositories/media.repository.mock.ts
++++ b/server/test/repositories/media.repository.mock.ts
+@@ -5,6 +5,7 @@ import type { RepositoryInterface } from 'src/types.js';
+ export const newMediaRepositoryMock = (): Mocked<RepositoryInterface<MediaRepository>> => {
+   return {
+     generateThumbnail: vitest.fn().mockImplementation(() => Promise.resolve()),
++    getVideoPreview: vitest.fn().mockResolvedValue(undefined),
+     writeExif: vitest.fn().mockImplementation(() => Promise.resolve()),
+     copyTagGroup: vitest.fn().mockImplementation(() => Promise.resolve()),
+     generateThumbhash: vitest.fn().mockResolvedValue(Buffer.from('')),
 diff --git a/web/src/lib/components/asset-viewer/VideoChapterMenu.spec.ts b/web/src/lib/components/asset-viewer/VideoChapterMenu.spec.ts
 new file mode 100644
-index 000000000..5af15941d
+index 0000000000000000000000000000000000000000..5af15941dff7567cffcf7e1abe8149e72060bc9b
 --- /dev/null
 +++ b/web/src/lib/components/asset-viewer/VideoChapterMenu.spec.ts
 @@ -0,0 +1,46 @@
@@ -1194,7 +2404,7 @@ index 000000000..5af15941d
 +});
 diff --git a/web/src/lib/components/asset-viewer/VideoChapterMenu.svelte b/web/src/lib/components/asset-viewer/VideoChapterMenu.svelte
 new file mode 100644
-index 000000000..27be749cc
+index 0000000000000000000000000000000000000000..27be749cc4703e01051fad52d0c785140cbf055f
 --- /dev/null
 +++ b/web/src/lib/components/asset-viewer/VideoChapterMenu.svelte
 @@ -0,0 +1,66 @@
@@ -1264,23 +2474,273 @@ index 000000000..27be749cc
 +    </ol>
 +  </details>
 +{/if}
+diff --git a/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte b/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte
+index 6f775e2be4999ecaef23200f1dc2b0e12f4cb7f8..ddfacbdb141105baf28c2b79f3cfd50229ef33cf 100644
+--- a/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte
++++ b/web/src/lib/components/asset-viewer/VideoNativeViewer.svelte
+@@ -1,11 +1,14 @@
+ <script lang="ts">
++  import VideoChapterMenu from '#lib/components/asset-viewer/VideoChapterMenu.svelte';
+   import VideoRemoteViewer from '#lib/components/asset-viewer/VideoRemoteViewer.svelte';
++  import VideoTimeline from '#lib/components/asset-viewer/VideoTimeline.svelte';
+   import FaceEditor from '#lib/components/asset-viewer/face-editor/FaceEditor.svelte';
+   import { assetViewerFadeDuration } from '#lib/constants.ts';
+   import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';
+   import { authManager } from '#lib/managers/auth-manager.svelte.ts';
+   import { castManager } from '#lib/managers/cast-manager.svelte.ts';
+   import { mediaCapabilitiesManager } from '#lib/managers/media-capabilities-manager.svelte.ts';
++  import { getAssetChaptersQuery } from '#lib/queries/asset.query.ts';
+   import { createPreloadedQuery } from '#lib/queries/client.ts';
+   import { getPublicConfigQuery } from '#lib/queries/config-public.query.ts';
+   import { autoPlayVideo, lang, loopVideo as loopVideoPreference } from '#lib/stores/preferences.store.ts';
+@@ -25,9 +28,17 @@
+     mdiVolumeMedium,
+     mdiVolumeMute,
+   } from '@mdi/js';
++  import { createQuery } from '@tanstack/svelte-query';
+   import 'hls-video-element';
+   import type HlsVideoElement from 'hls-video-element';
+-  import Hls, { AbrController, Events, type FragLoadedData, type FragLoadingData, type HlsConfig } from 'hls.js';
++  import Hls, {
++    AbrController,
++    Events,
++    type FragLoadedData,
++    type FragLoadingData,
++    type HlsConfig,
++    type Level,
++  } from 'hls.js';
+   import 'media-chrome/media-control-bar';
+   import 'media-chrome/media-controller';
+   import 'media-chrome/media-fullscreen-button';
+@@ -37,7 +48,6 @@
+   import 'media-chrome/media-time-display';
+   import 'media-chrome/media-volume-range';
+   import 'media-chrome/menu/media-playback-rate-menu';
+-  import 'media-chrome/menu/media-rendition-menu';
+   import 'media-chrome/menu/media-settings-menu';
+   import 'media-chrome/menu/media-settings-menu-button';
+   import 'media-chrome/menu/media-settings-menu-item';
+@@ -45,7 +55,7 @@
+   import { useSwipe, type SwipeCustomEvent } from 'svelte-gestures';
+   import { t } from 'svelte-i18n';
+   import { fade } from 'svelte/transition';
+-  import './immich-time-range';
++  import './immich-rendition-menu';
+ 
+   const query = createPreloadedQuery(getPublicConfigQuery);
+   const publicConfig = $derived(query.data);
+@@ -79,6 +89,20 @@
+   }: Props = $props();
+ 
+   let videoPlayer: HTMLVideoElement | undefined = $state();
++  const chaptersQuery = createQuery(() => getAssetChaptersQuery(assetId, cacheKey));
++  const chapters = $derived(chaptersQuery.data ?? []);
++  let currentTime = $state(0);
++  let duration = $state(0);
++
++  const onTimeUpdate = () => {
++    currentTime = videoPlayer?.currentTime ?? 0;
++  };
++
++  const onLoadedMetadata = () => {
++    hasLoadedMetadata = true;
++    duration = videoPlayer?.duration ?? 0;
++    onTimeUpdate();
++  };
+   let isLoading = $state(true);
+   let hasLoadedMetadata = $state(false);
+   let assetFileUrl = $derived.by(() => {
+@@ -94,6 +118,7 @@
+   });
+   const aspectRatio = $derived(asset.width && asset.height ? `${asset.width} / ${asset.height}` : undefined);
+   let showVideo = $state(false);
++  let originalRendition = $state<string>();
+   let hasFocused = $state(false);
+   let activeSession: { assetId: string; id: string } | undefined;
+   let rebuildCount = 0;
+@@ -101,6 +126,8 @@
+   const MAX_REBUILDS = 1;
+   const SESSION_ID_REGEX = /\/video\/stream\/([0-9a-f-]{36})\//;
+ 
++  const isOriginalLevel = (level?: Level) => level?.attrs['STABLE-VARIANT-ID'] === 'original';
++
+   // hls.js can abandon fetching an in-flight fragment if it thinks it'll take too long, in which case
+   // it emergency switches to a different variant. This extends the delay even further due to
+   // cold starting another transcode, so let the fragment finish and have steady ABR decide the next level.
+@@ -112,6 +139,21 @@
+   class NoAbandonAbrController extends AbrController {
+     private switchTarget = -1;
+ 
++    private encodedLevel(level: number) {
++      const levels = this.hls.levels;
++      if (!isOriginalLevel(levels[level])) {
++        return level;
++      }
++      const encoded = levels
++        .map((candidate, index) => (isOriginalLevel(candidate) ? -1 : index))
++        .filter((index) => index !== -1);
++      return encoded.findLast((index) => index < level) ?? encoded[0] ?? level;
++    }
++
++    override get firstAutoLevel(): number {
++      return this.encodedLevel(super.firstAutoLevel);
++    }
++
+     protected override onFragLoading(_event: Events.FRAG_LOADING, data: FragLoadingData) {
+       if (data.frag.sn === 'initSegment') {
+         this.switchTarget = data.frag.level;
+@@ -126,10 +168,15 @@
+     }
+ 
+     override get nextAutoLevel(): number {
+-      const level = super.nextAutoLevel;
++      const level = this.encodedLevel(super.nextAutoLevel);
+       const target = this.hls.levels[this.switchTarget];
+-      // Hold the committed level, but only while hls.js still considers it healthy.
+-      if (target && level < this.switchTarget && target.loadError === 0 && target.fragmentError === 0) {
++      if (
++        target &&
++        !isOriginalLevel(target) &&
++        level < this.switchTarget &&
++        target.loadError === 0 &&
++        target.fragmentError === 0
++      ) {
+         return this.switchTarget;
+       }
+       return level;
+@@ -192,7 +239,7 @@
+     // That backward request causes the server to restart transcoding for no reason.
+     Object.defineProperty(api, 'nextLevel', {
+       configurable: true,
+-      get: () => api.currentLevel,
++      get: () => api.manualLevel,
+       set: (level: number) => {
+         api.currentLevel = level;
+       },
+@@ -207,9 +254,12 @@
+         activeSession = { assetId, id };
+       }
+ 
++      const originalLevel = api.levels.findIndex((level) => isOriginalLevel(level));
++      originalRendition = originalLevel === -1 ? undefined : String(originalLevel);
++
+       const keep = await mediaCapabilitiesManager.efficientLevels(api.levels);
+       for (let i = api.levels.length - 1; i >= 0; i--) {
+-        if (!keep.has(i)) {
++        if (!keep.has(i) && !isOriginalLevel(api.levels[i])) {
+           api.removeLevel(i);
+         }
+       }
+@@ -247,6 +297,8 @@
+   $effect(() => {
+     // reactive on `assetFileUrl` changes
+     hasLoadedMetadata = false;
++    currentTime = 0;
++    duration = 0;
+     if (videoPlayer && assetFileUrl) {
+       hasFocused = false;
+       rebuildCount = 0;
+@@ -391,7 +443,9 @@
+             {...useSwipe(onSwipe)}
+             class="h-full object-contain"
+             oncanplay={(e: Event) => handleCanPlay(e.currentTarget as HTMLVideoElement)}
+-            onloadedmetadata={() => (hasLoadedMetadata = true)}
++            onloadedmetadata={onLoadedMetadata}
++            ontimeupdate={onTimeUpdate}
++            ondurationchange={() => (duration = videoPlayer?.duration ?? 0)}
+             onended={onVideoEnded}
+             onseeking={onSeeking}
+             onplaying={(e: Event) => {
+@@ -417,7 +471,9 @@
+             {...useSwipe(onSwipe)}
+             class="h-full object-contain"
+             oncanplay={(e) => handleCanPlay(e.currentTarget)}
+-            onloadedmetadata={() => (hasLoadedMetadata = true)}
++            onloadedmetadata={onLoadedMetadata}
++            ontimeupdate={onTimeUpdate}
++            ondurationchange={() => (duration = videoPlayer?.duration ?? 0)}
+             onended={onVideoEnded}
+             onseeking={onSeeking}
+             onplaying={(e) => {
+@@ -434,7 +490,7 @@
+         {/if}
+ 
+         {#if extendedControls}
+-          <media-settings-menu hidden anchor="auto" class="min-w-3xs rounded-xl border border-light-300 shadow-sm">
++          <media-settings-menu hidden anchor="auto" class="z-10 min-w-3xs rounded-xl border border-light-300 shadow-sm">
+             <Icon slot="checked-indicator" icon={mdiCheck} class="m-2" />
+             <media-settings-menu-item class="mx-1 rounded-lg p-1 ps-2">
+               {$t('media_chrome.playback_rate')}
+@@ -448,10 +504,15 @@
+               <media-settings-menu-item class="mx-1 rounded-lg p-1 ps-2">
+                 {$t('video_quality')}
+                 <Icon slot="suffix" icon={mdiChevronRight} class="m-2" />
+-                <media-rendition-menu slot="submenu" hidden>
++                <immich-rendition-menu
++                  slot="submenu"
++                  hidden
++                  original-rendition={originalRendition}
++                  original-label={$t('video_quality_original')}
++                >
+                   <Icon slot="back-icon" icon={mdiChevronLeft} class="m-2" />
+                   <span slot="title">{$t('video_quality')}</span>
+-                </media-rendition-menu>
++                </immich-rendition-menu>
+               </media-settings-menu-item>
+             {/if}
+           </media-settings-menu>
+@@ -470,6 +531,8 @@
+ 
+             <span class="grow"></span>
+ 
++            <VideoChapterMenu {chapters} player={videoPlayer} ready={hasLoadedMetadata} {currentTime} />
++
+             <div
+               class="volume-wrapper shrink-0 rounded-full bg-light-100/0 transition-colors duration-400 hover:bg-light-100"
+             >
+@@ -490,7 +553,7 @@
+               <media-settings-menu-button class="shrink-0 rounded-full p-2 outline-none"></media-settings-menu-button>
+             {/if}
+           </media-control-bar>
+-          <immich-time-range class="h-8 w-full rounded-lg px-2 pb-3 outline-none"></immich-time-range>
++          <VideoTimeline {assetId} {chapters} {duration} />
+         </div>
+       </media-controller>
+ 
+@@ -548,12 +611,12 @@
+     font-variant-numeric: tabular-nums;
+   }
+ 
+-  immich-time-range,
++  :global(immich-time-range),
+   media-volume-range {
+     --media-control-hover-background: none;
+   }
+ 
+-  immich-time-range:hover,
++  :global(immich-time-range:hover),
+   media-volume-range:hover {
+     --media-range-thumb-opacity: 1;
+   }
 diff --git a/web/src/lib/components/asset-viewer/VideoTimeline.spec.ts b/web/src/lib/components/asset-viewer/VideoTimeline.spec.ts
 new file mode 100644
-index 000000000..6dcf52c99
+index 0000000000000000000000000000000000000000..2818dd39f8f5e18f059af755c888b11fddf8f02d
 --- /dev/null
 +++ b/web/src/lib/components/asset-viewer/VideoTimeline.spec.ts
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,46 @@
 +import VideoTimeline from '#lib/components/asset-viewer/VideoTimeline.svelte';
++import { MediaUIEvents } from 'media-chrome/constants';
 +import { render } from 'vitest-browser-svelte';
 +
 +describe('VideoTimeline', () => {
++  const assetId = 'asset-id';
 +  const chapters = [
 +    { startTime: 0, endTime: 5, title: 'Intro' },
 +    { startTime: 5, endTime: 10, title: 'End' },
 +  ];
 +
 +  it('places chapter markers on the playback timeline', async () => {
-+    const { baseElement } = await render(VideoTimeline, { chapters, duration: 10 });
++    const { baseElement } = await render(VideoTimeline, { assetId, chapters, duration: 10 });
 +    const markers = baseElement.querySelectorAll(':scope [aria-hidden] span');
 +    expect(markers).toHaveLength(1);
 +    expect((markers[0] as HTMLElement).style.left).toBe('50%');
@@ -1288,31 +2748,101 @@ index 000000000..6dcf52c99
 +  });
 +
 +  it.each([0, NaN, Infinity])('omits markers when duration is unavailable: %s', async (duration) => {
-+    const { baseElement } = await render(VideoTimeline, { chapters, duration });
++    const { baseElement } = await render(VideoTimeline, { assetId, chapters, duration });
 +    expect(baseElement.querySelector('[aria-hidden]')).toBeNull();
 +  });
 +
 +  it('shows the normal seek bar for videos without chapters', async () => {
-+    const { baseElement } = await render(VideoTimeline, { chapters: [], duration: 10 });
++    const { baseElement } = await render(VideoTimeline, { assetId, chapters: [], duration: 10 });
 +    expect(baseElement.querySelectorAll(':scope [aria-hidden] span')).toHaveLength(0);
 +    expect(baseElement.querySelector('immich-time-range')).not.toBeNull();
++  });
++
++  it('debounces preview requests, clamps the last frame and clears the preview on pointer exit', async () => {
++    const { baseElement } = await render(VideoTimeline, { assetId, chapters, duration: 10 });
++    const range = baseElement.querySelector('immich-time-range')!;
++    const preview = (detail: number | null) =>
++      range.dispatchEvent(new CustomEvent(MediaUIEvents.MEDIA_PREVIEW_REQUEST, { detail }));
++
++    preview(2);
++    preview(10);
++    expect(range.querySelector('img')).toBeNull();
++    await expect
++      .poll(() => range.querySelector('img')?.getAttribute('src'))
++      .toContain('/assets/asset-id/video/preview?time=9');
++    preview(null);
++    await expect.poll(() => range.querySelector('img')).toBeNull();
 +  });
 +});
 diff --git a/web/src/lib/components/asset-viewer/VideoTimeline.svelte b/web/src/lib/components/asset-viewer/VideoTimeline.svelte
 new file mode 100644
-index 000000000..a593cad98
+index 0000000000000000000000000000000000000000..f4b21c2e0116839fb06dd9bf30b739f5a0462dfe
 --- /dev/null
 +++ b/web/src/lib/components/asset-viewer/VideoTimeline.svelte
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,74 @@
 +<script lang="ts">
++  import { getAssetVideoPreviewUrl } from '#lib/utils.ts';
 +  import type { AssetChapterResponseDto } from '@immich/sdk';
-+  import './immich-time-range';
++  import { MediaUIEvents } from 'media-chrome/constants';
++  import './immich-time-range.ts';
 +
-+  let { chapters, duration }: { chapters: AssetChapterResponseDto[]; duration: number } = $props();
++  let { assetId, chapters, duration }: { assetId: string; chapters: AssetChapterResponseDto[]; duration: number } =
++    $props();
++
++  let range: HTMLElement | undefined = $state();
++  let pointerTime: number | null = $state(null);
++  let requestedUrl: string | undefined = $state();
++  let imageReady = $state(false);
++  const previewUrl = $derived.by(() => {
++    if (pointerTime === null || !Number.isFinite(pointerTime) || !Number.isFinite(duration) || duration <= 0) {
++      return;
++    }
++    const interval = Math.max(1, Math.ceil(duration / 120));
++    const time = Math.max(0, Math.min(pointerTime, duration - 0.001));
++    return getAssetVideoPreviewUrl(assetId, Math.floor(time / interval) * interval);
++  });
++
++  $effect(() => {
++    const element = range;
++    if (!element) {
++      return;
++    }
++    const onPreview = (event: Event) => (pointerTime = (event as CustomEvent<number | null>).detail);
++    element.addEventListener(MediaUIEvents.MEDIA_PREVIEW_REQUEST, onPreview);
++    return () => element.removeEventListener(MediaUIEvents.MEDIA_PREVIEW_REQUEST, onPreview);
++  });
++
++  $effect(() => {
++    const url = previewUrl;
++    if (!url) {
++      requestedUrl = undefined;
++      return;
++    }
++    const timer = setTimeout(() => {
++      requestedUrl = url;
++      imageReady = false;
++    }, 120);
++    return () => clearTimeout(timer);
++  });
 +</script>
 +
 +<div class="relative h-8 w-full px-2 pb-3">
-+  <immich-time-range class="size-full rounded-lg outline-none"></immich-time-range>
++  <immich-time-range bind:this={range} class="size-full rounded-lg outline-none">
++    <div slot="preview" class="flex flex-col items-center overflow-hidden rounded-lg bg-black/85 text-white shadow-md">
++      {#if requestedUrl && requestedUrl === previewUrl}
++        {#key requestedUrl}
++          <img
++            src={requestedUrl}
++            alt=""
++            class="max-h-27 max-w-48 object-contain"
++            class:hidden={!imageReady}
++            onload={() => (imageReady = true)}
++          />
++        {/key}
++      {/if}
++      <media-preview-time-display class="px-2 py-1 text-xs"></media-preview-time-display>
++    </div>
++  </immich-time-range>
 +  {#if Number.isFinite(duration) && duration > 0}
 +    <div aria-hidden="true" class="pointer-events-none absolute inset-x-2 top-0 h-5">
 +      {#each chapters as chapter (chapter.startTime)}
@@ -1324,9 +2854,47 @@ index 000000000..a593cad98
 +    </div>
 +  {/if}
 +</div>
+diff --git a/web/src/lib/components/asset-viewer/immich-rendition-menu.ts b/web/src/lib/components/asset-viewer/immich-rendition-menu.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..15a565ad87afaf0d8dc28b6cf28065675f459796
+--- /dev/null
++++ b/web/src/lib/components/asset-viewer/immich-rendition-menu.ts
+@@ -0,0 +1,32 @@
++import { MediaRenditionMenu } from 'media-chrome/menu/media-rendition-menu';
++
++type Rendition = Parameters<MediaRenditionMenu['formatRendition']>[0];
++type FormatOptions = Parameters<MediaRenditionMenu['formatRendition']>[1];
++
++const LABEL_ATTRIBUTES = new Set(['original-rendition', 'original-label']);
++
++class ImmichRenditionMenu extends MediaRenditionMenu {
++  static override get observedAttributes(): string[] {
++    return [...MediaRenditionMenu.observedAttributes, ...LABEL_ATTRIBUTES];
++  }
++
++  override attributeChangedCallback(name: string, oldValue: string | null, newValue: string | null): void {
++    super.attributeChangedCallback(name, oldValue, newValue);
++    if (LABEL_ATTRIBUTES.has(name) && oldValue !== newValue) {
++      const renditions = this.mediaRenditionList;
++      this.mediaRenditionList = [];
++      this.mediaRenditionList = renditions;
++    }
++  }
++
++  override formatRendition(rendition: Rendition, options?: FormatOptions): string {
++    if (rendition.id === this.getAttribute('original-rendition')) {
++      return this.getAttribute('original-label') ?? 'Original';
++    }
++    return super.formatRendition(rendition, options);
++  }
++}
++
++if (!customElements.get('immich-rendition-menu')) {
++  customElements.define('immich-rendition-menu', ImmichRenditionMenu);
++}
 diff --git a/web/src/lib/queries/asset.query.spec.ts b/web/src/lib/queries/asset.query.spec.ts
 new file mode 100644
-index 000000000..bd421ffe8
+index 0000000000000000000000000000000000000000..bd421ffe802aeb03c23b2860ff68a0e9c982ce45
 --- /dev/null
 +++ b/web/src/lib/queries/asset.query.spec.ts
 @@ -0,0 +1,25 @@
@@ -1357,7 +2925,7 @@ index 000000000..bd421ffe8
 +});
 diff --git a/web/src/lib/queries/asset.query.ts b/web/src/lib/queries/asset.query.ts
 new file mode 100644
-index 000000000..37cfa00a5
+index 0000000000000000000000000000000000000000..37cfa00a5d516ba5dafd7b0ac24d0e5e2d685452
 --- /dev/null
 +++ b/web/src/lib/queries/asset.query.ts
 @@ -0,0 +1,11 @@
@@ -1372,16 +2940,59 @@ index 000000000..37cfa00a5
 +    queryKey: [...assetChaptersQueryKey, id, cacheKey, authManager.params],
 +    queryFn: ({ signal }) => getAssetChapters({ id, ...authManager.params }, { signal }),
 +  });
+diff --git a/web/src/lib/utils.ts b/web/src/lib/utils.ts
+index febeaaf33d5e7be4f9c3765d03e25c391d289ff1..71a8472589971ecb3c5c48788f8d44adf0e9e64d 100644
+--- a/web/src/lib/utils.ts
++++ b/web/src/lib/utils.ts
+@@ -12,6 +12,7 @@ import {
+   getAssetOriginalPath,
+   getAssetPlaybackPath,
+   getAssetThumbnailPath,
++  getAssetVideoPreviewPath,
+   getBaseUrl,
+   getPeopleThumbnailPath,
+   getUserProfileImagePath,
+@@ -243,6 +244,9 @@ export const getAssetPlaybackUrl = (options: AssetUrlOptions) => {
+   return createUrl(getAssetPlaybackPath(id), { ...authManager.params, c });
+ };
+ 
++export const getAssetVideoPreviewUrl = (id: string, time: number) =>
++  createUrl(getAssetVideoPreviewPath(id), { ...authManager.params, time });
++
+ export const getAssetHlsUrl = (id: string) => {
+   return createUrl(`/assets/${id}/video/stream/main.m3u8`, authManager.params);
+ };
+diff --git a/web/test/common/handlers.ts b/web/test/common/handlers.ts
+index 303625b44c7eae82cca06d02deaf822b6c7feafa..4c1cf6bac930b407ec3067f6d7f83838a426d58b 100644
+--- a/web/test/common/handlers.ts
++++ b/web/test/common/handlers.ts
+@@ -75,6 +75,7 @@ export const createHandlers = (data: MockData): Handlers => {
+     },
+     restoreAssets: ({ body }) => ({ json: { count: data.restoreAssets(body.ids) } }),
+     getAssetOcr: ({ params }) => ({ json: data.getOcr(params.id) }),
++    getAssetChapters: () => ({ json: [] }),
+     checkBulkUpload: ({ body }) => ({
+       json: { results: body.assets.map(({ id }) => ({ id, action: AssetUploadAction.Accept })) },
+     }),
+@@ -176,6 +177,7 @@ export const createHandlers = (data: MockData): Handlers => {
+     }),
+ 
+     playAssetVideo: () => ({ body: minimalMp4, contentType: 'video/mp4' }),
++    getAssetVideoPreview: ({ params }) => media(params.id),
+     viewAsset: ({ params }) => media(params.id),
+     downloadAsset: ({ params }) => media(params.id),
+   };
 diff --git a/web/test/medium/specs/asset-viewer/chapters.spec.ts b/web/test/medium/specs/asset-viewer/chapters.spec.ts
 new file mode 100644
-index 000000000..524b39139
+index 0000000000000000000000000000000000000000..16fd7d91497f91e39ee6b944da5914e8bc6259f5
 --- /dev/null
 +++ b/web/test/medium/specs/asset-viewer/chapters.spec.ts
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,184 @@
 +import { Route } from '#lib/route.ts';
 +import { factory } from '#test/common/factories.ts';
 +import { expect, test } from '#test/medium/fixtures.ts';
 +import { AssetTypeEnum, SharedLinkType } from '@immich/sdk';
++import type HlsVideoElement from 'hls-video-element';
 +import { readFileSync } from 'node:fs';
 +
 +const videoData = new Uint8Array(
@@ -1462,7 +3073,17 @@ index 000000000..524b39139
 +    await chapter.click();
 +    await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeCloseTo(1, 2);
 +    await expect(video).toHaveAttribute('src', source!);
-+    await expect(page.locator('immich-time-range').locator('..').locator('[aria-hidden] > span')).toHaveCount(2);
++    const timeline = page.locator('immich-time-range');
++    await expect(timeline.locator('..').locator('[aria-hidden] > span')).toHaveCount(2);
++    const bounds = (await timeline.boundingBox())!;
++    await timeline.hover({ position: { x: Math.round(bounds.width * 0.47), y: Math.round(bounds.height / 2) } });
++    const preview = timeline.locator('[slot="preview"]');
++    await expect(preview.locator('img')).toBeVisible();
++    await expect(preview.locator('img')).toHaveAttribute('src', /[?&]time=1(?:&|$)/);
++    await expect(preview.locator('media-preview-time-display')).toContainText('0:01');
++    if (sharedKey) {
++      await expect(preview.locator('img')).toHaveAttribute('src', /[?&]key=/);
++    }
 +    if (playback === 'transcoded') {
 +      await page.getByTitle('video_chapters', { exact: true }).focus();
 +      await page.keyboard.press('Enter');
@@ -1476,3 +3097,108 @@ index 000000000..524b39139
 +    });
 +  });
 +}
++
++test('switches between Original and Auto without losing chapter navigation', async ({ page, data, api }) => {
++  data.publicConfig.ffmpeg.realtime.enabled = true;
++  const asset = factory.asset({ type: AssetTypeEnum.Video, duration: 3000, width: 32, height: 32 });
++  const session = '08351af7-bf08-4914-bb52-fa4d56ade949';
++  const video = readFileSync(new URL('fixtures/chapter-quality.mp4', import.meta.url));
++  const mediaOffset = video.indexOf('moof') - 4;
++  data.addAssets(asset);
++  api.on({
++    getAssetChapters: () => ({ json: chapters }),
++    getMainPlaylist: () => ({
++      body: [
++        '#EXTM3U',
++        '#EXT-X-VERSION:7',
++        '#EXT-X-STREAM-INF:BANDWIDTH=10000,RESOLUTION=32x32,CODECS="avc1.64000a"',
++        `${session}/0/playlist.m3u8`,
++        '#EXT-X-STREAM-INF:BANDWIDTH=20000,RESOLUTION=32x32,CODECS="avc1.64000a",STABLE-VARIANT-ID="original"',
++        `${session}/15/playlist.m3u8`,
++        '',
++      ].join('\n'),
++      contentType: 'application/vnd.apple.mpegurl',
++    }),
++    getMediaPlaylist: () => ({
++      body: [
++        '#EXTM3U',
++        '#EXT-X-VERSION:7',
++        '#EXT-X-TARGETDURATION:3',
++        '#EXT-X-MEDIA-SEQUENCE:0',
++        '#EXT-X-MAP:URI="init.mp4"',
++        '#EXTINF:3.0,',
++        'seg_0.m4s',
++        '#EXT-X-ENDLIST',
++        '',
++      ].join('\n'),
++      contentType: 'application/vnd.apple.mpegurl',
++    }),
++    getSegment: ({ params }) => ({
++      body: new Uint8Array(
++        params.filename === 'init.mp4' ? video.subarray(0, mediaOffset) : video.subarray(mediaOffset),
++      ),
++      contentType: 'video/mp4',
++    }),
++    endSession: () => ({ status: 204 }),
++  });
++
++  await page.goto(Route.photos());
++  await page.evaluate(() => localStorage.setItem('auto-play-video', 'false'));
++  await page.goto(Route.viewAsset(asset));
++
++  const player = page.locator('hls-video');
++  await expect.poll(() => player.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThanOrEqual(1);
++  const openQualityMenu = async () => {
++    await page.locator('media-settings-menu-button').click();
++    await page
++      .locator('media-settings-menu > media-settings-menu-item')
++      .filter({ has: page.locator('immich-rendition-menu') })
++      .click();
++  };
++
++  await openQualityMenu();
++  const originalPlaylist = page.waitForResponse((response) => response.url().includes(`${session}/15/playlist.m3u8`));
++  await page.getByRole('menuitemradio', { name: 'video_quality_original' }).click();
++  await expect.poll(() => player.evaluate((element: HlsVideoElement) => element.api?.manualLevel)).toBe(1);
++  const response = await originalPlaylist;
++  expect(response.ok()).toBe(true);
++
++  await page.getByTitle('video_chapters', { exact: true }).click();
++  await page.getByRole('button', { name: '0:01 Snow = 雪' }).click();
++  await expect.poll(() => player.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeCloseTo(1, 2);
++
++  await openQualityMenu();
++  await page.locator('immich-rendition-menu [role="menuitemradio"][value="auto"]').click();
++  await expect.poll(() => player.evaluate((element: HlsVideoElement) => element.api?.manualLevel)).toBe(-1);
++  await page.goto(Route.photos());
++});
+diff --git a/web/test/medium/specs/asset-viewer/fixtures/chapter-quality.mp4 b/web/test/medium/specs/asset-viewer/fixtures/chapter-quality.mp4
+new file mode 100644
+index 0000000000000000000000000000000000000000..b1098aba152fa0877b0bfca671209a3c05d22565
+GIT binary patch
+literal 1792
+zcmaJ>&ub(_6s}HoLtIx3n7|$)lp0~dWYRs8j4{xVF)U_rMK3N0LR;Nkoo=UprK)B!
+zv!@^)^dAsiA-gA05IikjR(6HGh<7n4;v$H$;2vEMX8c}HCOZc4F;(w--+T3{>b>e=
+zjLk=;UnaU(Wo&|x#%N~cio@8Xl@&#oF_vcCID{UP$=@o&Vhq2B@-GAQ347yV<bR<F
+zoZ*yFq7CPprd{nhITm;#+y8h@L~c+hKN`%so`s1ZD+^EFYXdZ6uivTEQXHnLLYTTq
+zC`Xv|W!S}*$iq}pjP-Js<PpGZH>;A4A7LRJ`sPC=DTajnXFDq8Lu@^&jh_PF(ngPp
+zO)+1HZh&S~GM;nDaK_mdAPo|0?h@jg^_t_<9NXq;;`i#!m7%km&kY99tBBgPLUv|w
+zmz~>&{`}x#dTIkrXEa%pcixwK7MqIi{qpV8xBq_dfY#2GLYL5V3>ve(Q3e_^eKgpN
+zHbz&}aDuIaF?$yFl`)$jVuE6fJD+uB4>mWd(&QTLITpr5Co}@Y8=0&$`JNi@8Tzb5
+zSyEY#Wid%L9eUw2Q_!aKp{N$q1`NfEP`n1!4(5mW0H|LxS#<nRC~gmrl=yi=`~+JA
+z2G5};Zdz3)Hfy5L3?b;DY#G(b89Q?t<`l+tym-jOO-5B`>@iTJ&mP&(l|XX>PYn6V
+z=?sU)x@%LX2ZN7)yzu*1zaDIT`N87%{NR~C?o-405)TR`xzk()+^T_Ee&w|bFD<R`
+z*5yt3LK(oZS(N=$MuyjIyRlTa>l7UuQ?4&B@9yr_=+PIc$ZLh#UZ%XY*kmbUiqa%S
+zuGe`Wd=a<~$HR6TJd}P~1Z~$@x7Teha*_76bnRYa-R?O~gJ;r>WsmEQ5A-}QbstMH
+zdn$CDnvF%6c$V~J=ut)oD?BCgZRt8q9>l81gomXLJ&iO?G|*aaEes4mu#>qqjv&G-
+zMK0aCv*<WH654pBZYL#03=`~>UJ*rF8h5GAO{}nj5~W4a7BLL(A*a(Mz*$Cw&2v@l
+z5hR%~bdDr9Ql$bx;Qh3tMBfXFtP}=zfD+-UBso$bPzj2Ol*pt;v3#%W11F(d2Nt0y
+z=@!1{CqmOEiIUa5c4e|18y~)+l)1NEl<*G85=+~%kKAs3)jonA{)xcrK;|;&7<a{{
+zQz}6fRZ_=Ttpe}(w&YiV8>on9_@E`-3Wi&6)NH;(cX91n6R@Pbl@>j>`2q-SWa+N(
+zq(qPK9?(MM5<6%=HIwb($<E35-eq%x!#}^dfBTbrKm2s#)>{_)3yw!xR~OROtB2qH
+z3}d>r|6=c*YYTS?Tl>Pamd{tbwI93<O#I`mtMcNft@xu$)6WhLZ+s1EGea?<pEJ-F
+Z0OUxG^hQPEFYQUI`Y`b+tI>bW=0E8mhQj~=
+
+literal 0
+HcmV?d00001
+
