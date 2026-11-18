@@ -101,6 +101,19 @@ describe(MediaRepository.name, () => {
     await expect(sut.getVideoPreview(input, 10)).resolves.toBeUndefined();
   });
 
+  it.each([1, 5])('generates a single JPEG grid of video frames sampled every %s seconds', async (interval) => {
+    const input = fileURLToPath(new URL('../../test/fixtures/chapters/chapters.mp4', import.meta.url));
+    const image = await sut.generateVideoPreviewSheet(input, {
+      width: 160,
+      height: 90,
+      columns: 2,
+      interval,
+      count: 3,
+    });
+    const { format, width, height } = await sharp(image).metadata();
+    expect({ format, width, height }).toEqual({ format: 'jpeg', width: 320, height: 180 });
+  });
+
   describe('edit (single actions)', () => {
     it('should apply crop edit correctly', async () => {
       const result = sut['edit'](

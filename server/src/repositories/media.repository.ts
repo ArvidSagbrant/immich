@@ -7,7 +7,7 @@ import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { Writable } from 'node:stream';
 import { promisify } from 'node:util';
-import sharp, { Sharp } from 'sharp';
+import sharp, { Sharp, type OverlayOptions } from 'sharp';
 import { ORIENTATION_TO_SHARP_ROTATION } from 'src/constants.js';
 import { Exif } from 'src/database.js';
 import { AssetEditActionItem } from 'src/dtos/editing.dto.js';
@@ -41,6 +41,7 @@ import type {
 import { extractChapters } from 'src/utils/chapters.js';
 import { handlePromiseError } from 'src/utils/misc.js';
 import { createAffineMatrix } from 'src/utils/transform.js';
+import type { VideoPreviewSheetLayout } from 'src/utils/video-preview-sheet.js';
 
 const probe = (input: string, options: string[]): Promise<FfprobeData> =>
   new Promise((resolve, reject) =>
@@ -116,6 +117,81 @@ export class MediaRepository {
     } catch {
       return undefined;
     }
+  }
+
+  async generateVideoPreviewSheet(input: string, layout: VideoPreviewSheetLayout) {
+    const { width, height, columns, interval, count } = layout;
+    if (interval >= 5) {
+      return this.generateSparseVideoPreviewSheet(input, layout);
+    }
+    const filters = [
+      `fps=fps=1/${interval}:start_time=0:round=up`,
+      `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2`,
+      `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`,
+      'setsar=1',
+      `tile=${columns}x${Math.ceil(count / columns)}:nb_frames=${count}`,
+    ];
+    const args = [
+      '-nostdin',
+      '-v',
+      'error',
+      '-protocol_whitelist',
+      'file',
+      '-filter_threads',
+      '1',
+      '-threads',
+      '2',
+      '-i',
+      input,
+      '-map',
+      '0:V:0',
+      '-map_metadata',
+      '-1',
+      '-vf',
+      filters.join(','),
+      '-frames:v',
+      '1',
+      '-c:v',
+      'mjpeg',
+      '-q:v',
+      '5',
+      '-threads',
+      '1',
+      '-f',
+      'image2pipe',
+      'pipe:1',
+    ];
+    const { stdout } = await execFileAsync('ffmpeg', args, {
+      encoding: 'buffer',
+      killSignal: 'SIGKILL',
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 20 * 60 * 1000,
+    });
+    return stdout;
+  }
+
+  private async generateSparseVideoPreviewSheet(
+    input: string,
+    { width, height, columns, interval, count }: VideoPreviewSheetLayout,
+  ) {
+    const cells: OverlayOptions[] = [];
+    let previous: Buffer | undefined;
+    for (let index = 0; index < count; index++) {
+      const frame = await this.getVideoPreview(input, index * interval);
+      if (frame) {
+        previous = await sharp(frame).resize(width, height, { fit: 'contain', background: 'black' }).toBuffer();
+      }
+      if (!previous) {
+        throw new Error('No frame is available at the start of the video');
+      }
+      cells.push({ input: previous, left: (index % columns) * width, top: Math.floor(index / columns) * height });
+    }
+    return sharp({
+      create: { width: width * columns, height: height * Math.ceil(count / columns), channels: 3, background: 'black' },
+    })
+      .composite(cells)
+      .jpeg({ quality: 82 })
+      .toBuffer();
   }
 
   /**

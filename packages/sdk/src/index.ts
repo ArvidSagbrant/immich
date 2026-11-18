@@ -90,6 +90,9 @@ export const getAssetPlaybackPath = (id: string) =>
 export const getAssetVideoPreviewPath = (id: string) =>
   `/assets/${id}/video/preview`;
 
+export const getAssetVideoPreviewSheetPath = (id: string) =>
+  `/assets/${id}/video/preview-sheet`;
+
 export const getUserProfileImagePath = (userId: string) =>
   `/users/${userId}/profile-image`;
 

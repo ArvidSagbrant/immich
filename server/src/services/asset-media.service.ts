@@ -26,6 +26,7 @@ import { AssetDownloadOriginalDto } from 'src/dtos/asset.dto.js';
 import { AuthDto, isEditedOnly, isMetadataHidden } from 'src/dtos/auth.dto.js';
 import {
   AssetFileType,
+  AssetType,
   AssetVisibility,
   CacheControl,
   ChecksumAlgorithm,
@@ -42,6 +43,7 @@ import { isAssetChecksumConstraint } from 'src/utils/database.js';
 import { ImmichFileResponse, getFileNameWithoutExtension, getFilenameExtension } from 'src/utils/file.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
 import { fromChecksum } from 'src/utils/request.js';
+import { getVideoPreviewSheetLayout } from 'src/utils/video-preview-sheet.js';
 
 export interface AssetMediaRedirectResponse {
   targetSize: AssetMediaSize | 'original';
@@ -365,6 +367,33 @@ export class AssetMediaService extends BaseService {
       .finally(() => this.activeVideoPreviews.delete(key));
     this.activeVideoPreviews.set(key, preview);
     return preview;
+  }
+
+  async getVideoPreviewSheet(auth: AuthDto, id: string) {
+    await this.requireAccess({ auth, permission: Permission.AssetView, ids: [id] });
+    const asset = await this.assetRepository.getById(id, { files: true });
+    if (!asset || asset.type !== AssetType.Video) {
+      throw new NotFoundException('Asset not found or asset is not a video');
+    }
+    const layout = getVideoPreviewSheetLayout(asset.duration);
+    if (!layout || asset.isOffline || asset.deletedAt) {
+      return;
+    }
+    const path = StorageCore.getVideoPreviewSheetPath(asset);
+    if (
+      asset.files?.some((file) => file.type === AssetFileType.VideoPreviewSheet && file.path === path) &&
+      (await this.storageRepository.checkFileExists(path))
+    ) {
+      return {
+        layout,
+        file: new ImmichFileResponse({
+          path,
+          contentType: 'image/jpeg',
+          cacheControl: CacheControl.PrivateWithoutCache,
+        }),
+      };
+    }
+    await this.jobRepository.queue({ name: JobName.AssetGenerateVideoPreviewSheet, data: { id } });
   }
 
   async bulkUploadCheck(auth: AuthDto, dto: AssetBulkUploadCheckDto): Promise<AssetBulkUploadCheckResponseDto> {

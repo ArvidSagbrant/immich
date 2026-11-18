@@ -45,6 +45,8 @@
   import 'media-chrome/media-mute-button';
   import 'media-chrome/media-play-button';
   import 'media-chrome/media-playback-rate-button';
+  import 'media-chrome/media-seek-backward-button';
+  import 'media-chrome/media-seek-forward-button';
   import 'media-chrome/media-time-display';
   import 'media-chrome/media-volume-range';
   import 'media-chrome/menu/media-playback-rate-menu';
@@ -518,15 +520,19 @@
           </media-settings-menu>
         {/if}
 
-        <div class="relative isolate flex h-32 w-full flex-col justify-end px-4">
+        <div class="relative isolate flex h-32 w-full flex-col justify-end px-2 sm:px-4">
           <div
             class="pointer-events-none absolute inset-x-0 bottom-0 -z-10 h-48 bg-black/80 mask-smoothstep-to-top"
           ></div>
-          <media-control-bar part="bottom" class="flex h-10 w-full gap-2">
+          <media-control-bar part="bottom" class="flex h-10 w-full gap-0.5 sm:gap-2">
+            <media-seek-backward-button seekoffset="10" class="shrink-0 rounded-full p-1.5 outline-none sm:p-2"
+            ></media-seek-backward-button>
             <media-play-button class="shrink-0 rounded-full p-2 outline-none">
               <Icon slot="play" icon={mdiPlay} />
               <Icon slot="pause" icon={mdiPause} />
             </media-play-button>
+            <media-seek-forward-button seekoffset="10" class="shrink-0 rounded-full p-1.5 outline-none sm:p-2"
+            ></media-seek-forward-button>
             <media-time-display showduration class="rounded-lg p-2 outline-none"></media-time-display>
 
             <span class="grow"></span>

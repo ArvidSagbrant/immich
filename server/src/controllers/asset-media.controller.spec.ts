@@ -74,6 +74,18 @@ describe(AssetMediaController.name, () => {
     });
   });
 
+  it('returns a non-cacheable pending response for a video preview sheet', async () => {
+    const id = factory.uuid();
+    ctx.authenticate.mockResolvedValue(authStub.adminSharedLink);
+    service.getVideoPreviewSheet.mockResolvedValue(undefined);
+
+    const { status, headers } = await request(ctx.getHttpServer()).get(`/assets/${id}/video/preview-sheet?key=secret`);
+
+    expect(status).toBe(204);
+    expect(headers['cache-control']).toBe('private, no-store');
+    expect(service.getVideoPreviewSheet).toHaveBeenCalledWith(authStub.adminSharedLink, id);
+  });
+
   describe('POST /assets', () => {
     it('should accept metadata', async () => {
       const mobileMetadata = { key: AssetMetadataKey.MobileApp, value: { iCloudId: '123' } };

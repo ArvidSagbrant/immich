@@ -45,6 +45,7 @@ import { BaseConfig, ThumbnailConfig } from 'src/utils/media.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
 import { batched, clamp } from 'src/utils/misc.js';
 import { getOutputDimensions } from 'src/utils/transform.js';
+import { getVideoPreviewSheetLayout } from 'src/utils/video-preview-sheet.js';
 
 interface UpsertFileOptions {
   assetId: string;
@@ -225,6 +226,10 @@ export class MediaService extends BaseService {
 
     if (!asset.thumbhash || Buffer.compare(asset.thumbhash, thumbhash) !== 0) {
       await this.assetRepository.update({ id: asset.id, thumbhash });
+    }
+
+    if (asset.type === AssetType.Video) {
+      await this.jobRepository.queue({ name: JobName.AssetGenerateVideoPreviewSheet, data: { id } });
     }
 
     return JobStatus.Success;
@@ -555,6 +560,71 @@ export class MediaService extends BaseService {
       );
     }
 
+    return JobStatus.Success;
+  }
+
+  @OnJob({ name: JobName.AssetGenerateVideoPreviewSheetsQueueAll, queue: QueueName.VideoConversion })
+  async handleQueueVideoPreviewSheets(): Promise<JobStatus> {
+    for await (const assets of batched(this.assetJobRepository.streamForVideoPreviewSheets())) {
+      await this.jobRepository.queueAll(
+        assets.map(({ id }) => ({ name: JobName.AssetGenerateVideoPreviewSheet, data: { id } })),
+      );
+    }
+    return JobStatus.Success;
+  }
+
+  @OnJob({ name: JobName.AssetGenerateVideoPreviewSheet, queue: QueueName.VideoConversion })
+  async handleVideoPreviewSheet({ id }: JobOf<JobName.AssetGenerateVideoPreviewSheet>): Promise<JobStatus> {
+    const asset = await this.assetRepository.getById(id, { files: true });
+    if (!asset || asset.type !== AssetType.Video || asset.isOffline || asset.deletedAt) {
+      return JobStatus.Skipped;
+    }
+    const layout = getVideoPreviewSheetLayout(asset.duration);
+    if (!layout) {
+      return JobStatus.Skipped;
+    }
+    const path = StorageCore.getVideoPreviewSheetPath(asset);
+    const existing = getAssetFile(asset.files ?? [], AssetFileType.VideoPreviewSheet, { isEdited: false });
+    if (existing?.path === path && (await this.storageRepository.checkFileExists(path))) {
+      return JobStatus.Skipped;
+    }
+
+    const encodedVideo = getAssetFile(asset.files ?? [], AssetFileType.EncodedVideo, { isEdited: false });
+    let jpeg: Buffer;
+    try {
+      jpeg = await this.mediaRepository.generateVideoPreviewSheet(encodedVideo?.path ?? asset.originalPath, layout);
+    } catch (error) {
+      if (!encodedVideo) {
+        throw error;
+      }
+      jpeg = await this.mediaRepository.generateVideoPreviewSheet(asset.originalPath, layout);
+    }
+    if (jpeg.length === 0) {
+      return JobStatus.Skipped;
+    }
+    const latest = await this.assetRepository.getById(id);
+    if (!latest || latest.deletedAt || path !== StorageCore.getVideoPreviewSheetPath(latest)) {
+      return JobStatus.Skipped;
+    }
+
+    this.storageCore.ensureFolders(path);
+    const temporaryPath = `${path}.${this.cryptoRepository.randomUUID()}.tmp`;
+    try {
+      await this.storageRepository.createOrOverwriteFile(temporaryPath, jpeg);
+      await this.storageRepository.rename(temporaryPath, path);
+    } catch (error) {
+      await this.storageRepository.unlink(temporaryPath);
+      throw error;
+    }
+    try {
+      await this.assetRepository.upsertFile({ assetId: id, type: AssetFileType.VideoPreviewSheet, path });
+    } catch (error) {
+      await this.storageRepository.unlink(path);
+      throw error;
+    }
+    if (existing && existing.path !== path) {
+      await this.jobRepository.queue({ name: JobName.FileDelete, data: { files: [existing.path] } });
+    }
     return JobStatus.Success;
   }
 

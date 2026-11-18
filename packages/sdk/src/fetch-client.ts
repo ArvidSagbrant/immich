@@ -5189,6 +5189,26 @@ export function getAssetVideoPreview({ id, key, slug, time }: {
     }));
 }
 /**
+ * Get video preview sheet
+ */
+export function getAssetVideoPreviewSheet({ id, key, slug }: {
+    id: string;
+    key?: string;
+    slug?: string;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchBlob<{
+        status: 200;
+        data: Blob;
+    } | {
+        status: 204;
+    }>(`/assets/${encodeURIComponent(id)}/video/preview-sheet${QS.query(QS.explode({
+        key,
+        slug
+    }))}`, {
+        ...opts
+    }));
+}
+/**
  * Get HLS main playlist
  */
 export function getMainPlaylist({ id, key, slug }: {
@@ -8538,7 +8558,8 @@ export enum AssetFileType {
     Preview = "preview",
     Thumbnail = "thumbnail",
     Sidecar = "sidecar",
-    EncodedVideo = "encoded_video"
+    EncodedVideo = "encoded_video",
+    VideoPreviewSheet = "video_preview_sheet"
 }
 export enum AssetMediaStatus {
     Created = "created",
@@ -8596,6 +8617,7 @@ export enum ManualJobName {
     MemoryCleanup = "memory-cleanup",
     MemoryCreate = "memory-create",
     BackupDatabase = "backup-database",
+    VideoPreviewSheets = "video-preview-sheets",
     IntegrityMissingFiles = "integrity-missing-files",
     IntegrityUntrackedFiles = "integrity-untracked-files",
     IntegrityChecksumMismatch = "integrity-checksum-mismatch",
@@ -8686,6 +8708,8 @@ export enum JobName {
     AssetFileMigration = "AssetFileMigration",
     AssetGenerateThumbnailsQueueAll = "AssetGenerateThumbnailsQueueAll",
     AssetGenerateThumbnails = "AssetGenerateThumbnails",
+    AssetGenerateVideoPreviewSheet = "AssetGenerateVideoPreviewSheet",
+    AssetGenerateVideoPreviewSheetsQueueAll = "AssetGenerateVideoPreviewSheetsQueueAll",
     AuditTableCleanup = "AuditTableCleanup",
     AuthChallengeCleanup = "AuthChallengeCleanup",
     DatabaseBackup = "DatabaseBackup",

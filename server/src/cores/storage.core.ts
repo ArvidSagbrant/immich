@@ -133,6 +133,14 @@ export class StorageCore {
     return StorageCore.getNestedPath(StorageFolder.EncodedVideo, asset.ownerId, `${asset.id}.mp4`);
   }
 
+  static getVideoPreviewSheetPath(asset: ThumbnailPathEntity & { fileModifiedAt: Date; duration: number | null }) {
+    return StorageCore.getNestedPath(
+      StorageFolder.Thumbnails,
+      asset.ownerId,
+      `${asset.id}_video_preview_v1_${asset.fileModifiedAt.getTime()}_${asset.duration}.jpg`,
+    );
+  }
+
   static getHlsSessionFolder({ ownerId, sessionId }: HlsSessionFolder) {
     return StorageCore.getNestedPath(StorageFolder.EncodedVideo, ownerId, sessionId);
   }
@@ -332,6 +340,7 @@ export class StorageCore {
       case AssetFileType.EncodedVideo:
       case AssetFileType.Thumbnail:
       case AssetFileType.Preview:
+      case AssetFileType.VideoPreviewSheet:
       case AssetFileType.Sidecar:
       case AssetPathType.EncodedVideo: {
         return this.assetRepository.upsertFile({ assetId: id, type: pathType as AssetFileType, path: newPath });

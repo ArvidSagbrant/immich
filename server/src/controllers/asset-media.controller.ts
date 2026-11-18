@@ -16,7 +16,7 @@ import {
   UploadedFiles,
   UseInterceptors,
 } from '@nestjs/common';
-import { ApiBody, ApiConsumes, ApiHeader, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { ApiBody, ApiConsumes, ApiHeader, ApiNoContentResponse, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { type NextFunction, type Request, type Response } from 'express';
 import { Endpoint, HistoryBuilder } from 'src/decorators.js';
 import {
@@ -195,6 +195,31 @@ export class AssetMediaController {
     @Query() { time }: VideoPreviewOptionsDto,
   ): Promise<StreamableFile> {
     return new StreamableFile(await this.service.getVideoPreview(auth, id, time), { type: 'image/jpeg' });
+  }
+
+  @Get(':id/video/preview-sheet')
+  @FileResponse()
+  @ApiNoContentResponse({ description: 'The preview sheet is not ready.' })
+  @Authenticated({ permission: Permission.AssetView, sharedLink: true })
+  @Endpoint({
+    summary: 'Get video preview sheet',
+    description: 'Returns a JPEG grid of timeline previews with the cell layout in X-Immich-Preview-Layout.',
+    history: new HistoryBuilder().added('v3'),
+  })
+  async getAssetVideoPreviewSheet(
+    @Auth() auth: AuthDto,
+    @Param() { id }: UUIDParamDto,
+    @Res() res: Response,
+    @Next() next: NextFunction,
+  ) {
+    const result = await this.service.getVideoPreviewSheet(auth, id);
+    if (!result) {
+      res.header('Cache-Control', 'private, no-store').status(HttpStatus.NO_CONTENT).end();
+      return;
+    }
+    const { width, height, columns, interval, count } = result.layout;
+    res.header('X-Immich-Preview-Layout', [width, height, columns, interval, count].join(','));
+    await sendFile(res, next, () => result.file, this.logger);
   }
 
   @Post('bulk-upload-check')

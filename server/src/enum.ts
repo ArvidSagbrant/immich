@@ -65,6 +65,7 @@ export enum AssetFileType {
   Thumbnail = 'thumbnail',
   Sidecar = 'sidecar',
   EncodedVideo = 'encoded_video',
+  VideoPreviewSheet = 'video_preview_sheet',
 }
 
 export const AssetFileTypeSchema = z.enum(AssetFileType).describe('Type of file').meta({ id: 'AssetFileType' });
@@ -478,6 +479,7 @@ export enum ManualJobName {
   MemoryCleanup = 'memory-cleanup',
   MemoryCreate = 'memory-create',
   BackupDatabase = 'backup-database',
+  VideoPreviewSheets = 'video-preview-sheets',
   IntegrityMissingFiles = `integrity-missing-files`,
   IntegrityUntrackedFiles = `integrity-untracked-files`,
   IntegrityChecksumFiles = `integrity-checksum-mismatch`,
@@ -900,6 +902,8 @@ export enum JobName {
   AssetFileMigration = 'AssetFileMigration',
   AssetGenerateThumbnailsQueueAll = 'AssetGenerateThumbnailsQueueAll',
   AssetGenerateThumbnails = 'AssetGenerateThumbnails',
+  AssetGenerateVideoPreviewSheet = 'AssetGenerateVideoPreviewSheet',
+  AssetGenerateVideoPreviewSheetsQueueAll = 'AssetGenerateVideoPreviewSheetsQueueAll',
 
   AuditTableCleanup = 'AuditTableCleanup',
 

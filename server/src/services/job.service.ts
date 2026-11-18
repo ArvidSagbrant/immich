@@ -33,6 +33,9 @@ const asJobItem = (dto: JobCreateDto): JobItem => {
     case ManualJobName.BackupDatabase: {
       return { name: JobName.DatabaseBackup };
     }
+    case ManualJobName.VideoPreviewSheets: {
+      return { name: JobName.AssetGenerateVideoPreviewSheetsQueueAll };
+    }
 
     case ManualJobName.IntegrityMissingFiles: {
       return { name: JobName.IntegrityMissingFilesQueueAll };

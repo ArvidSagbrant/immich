@@ -264,6 +264,12 @@ export class JobRepository {
       case JobName.StorageTemplateMigrationSingle: {
         return { jobId: item.data.id };
       }
+      case JobName.AssetGenerateVideoPreviewSheet: {
+        return { deduplication: { id: `${item.name}-${item.data.id}` } };
+      }
+      case JobName.AssetGenerateVideoPreviewSheetsQueueAll: {
+        return { deduplication: { id: item.name } };
+      }
       case JobName.PersonGenerateThumbnail: {
         return { priority: 1 };
       }

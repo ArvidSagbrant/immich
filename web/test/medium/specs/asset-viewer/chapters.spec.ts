@@ -22,6 +22,11 @@ const chapters = [
   { startTime: 1, endTime: 2, title: 'Snow = 雪' },
   { startTime: 2, endTime: 3, title: null },
 ];
+const previewSheetResponse = {
+  body: '<svg xmlns="http://www.w3.org/2000/svg" width="72" height="12"><path fill="red" d="M0 0h24v12H0z"/><path fill="green" d="M24 0h24v12H24z"/><path fill="blue" d="M48 0h24v12H48z"/></svg>',
+  contentType: 'image/svg+xml',
+  headers: { 'X-Immich-Preview-Layout': '24,12,3,1,3' },
+};
 
 test.afterEach(async ({ page }) => {
   await page.evaluate(() => {
@@ -44,6 +49,7 @@ for (const playback of ['original', 'transcoded', 'shared-link']) {
     data.addAssets(asset);
     api.on({
       getAssetChapters: () => ({ json: chapters }),
+      getAssetVideoPreviewSheet: () => previewSheetResponse,
       playAssetVideo: () => videoResponse,
       downloadAsset: () => videoResponse,
     });
@@ -89,12 +95,31 @@ for (const playback of ['original', 'transcoded', 'shared-link']) {
     await timeline.hover({ position: { x: Math.round(bounds.width * 0.47), y: Math.round(bounds.height / 2) } });
     const preview = timeline.locator('[slot="preview"]');
     await expect(preview.locator('img')).toBeVisible();
-    await expect(preview.locator('img')).toHaveAttribute('src', /[?&]time=1(?:&|$)/);
+    const image = preview.locator('img');
+    await expect(image).toHaveAttribute('src', /^blob:/);
+    await expect(image).toHaveCSS('left', '-24px');
     await expect(preview.locator('media-preview-time-display')).toContainText('0:01');
-    if (sharedKey) {
-      await expect(preview.locator('img')).toHaveAttribute('src', /[?&]key=/);
-    }
+    const imageUrl = await image.getAttribute('src');
+    await page.mouse.down();
+    await page.mouse.move(bounds.x + bounds.width * 0.85, bounds.y + bounds.height / 2);
+    await expect(image).toHaveCSS('left', '-48px');
+    await expect(image).toHaveAttribute('src', imageUrl!);
+    await page.mouse.up();
+    expect(api.getAssetVideoPreview).not.toHaveBeenCalled();
+    expect(api.getAssetVideoPreviewSheet).toHaveBeenCalledWith({
+      params: expect.objectContaining({ id: asset.id, ...(sharedKey && { key: sharedKey }) }),
+    });
     if (playback === 'transcoded') {
+      const forward = page.locator('media-seek-forward-button');
+      const backward = page.locator('media-seek-backward-button');
+      await expect(forward).toHaveAttribute('seekoffset', '10');
+      await expect(backward).toHaveAttribute('seekoffset', '10');
+      await forward.click();
+      await expect
+        .poll(() => video.evaluate((element: HTMLVideoElement) => element.duration - element.currentTime))
+        .toBeCloseTo(0, 2);
+      await backward.click();
+      await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBe(0);
       await page.getByTitle('video_chapters', { exact: true }).focus();
       await page.keyboard.press('Enter');
       await page.keyboard.press('Tab');

@@ -345,6 +345,19 @@ export class AssetJobRepository {
       .stream();
   }
 
+  streamForVideoPreviewSheets() {
+    return this.db
+      .selectFrom('asset')
+      .select('asset.id')
+      .where('asset.type', '=', AssetType.Video)
+      .where('asset.duration', '>', 0)
+      .where('asset.visibility', '!=', AssetVisibility.Hidden)
+      .where('asset.deletedAt', 'is', null)
+      .where('asset.isOffline', '=', false)
+      .orderBy('asset.duration', 'asc')
+      .stream();
+  }
+
   @GenerateSql({ params: [DummyValue.UUID] })
   getForVideoConversion(id: string) {
     return this.db

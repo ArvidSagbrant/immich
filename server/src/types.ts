@@ -355,6 +355,8 @@ export type JobItem =
   // Thumbnails
   | { name: JobName.AssetGenerateThumbnailsQueueAll; data: IBaseJob }
   | { name: JobName.AssetGenerateThumbnails; data: IEntityJob }
+  | { name: JobName.AssetGenerateVideoPreviewSheet; data: IEntityJob }
+  | { name: JobName.AssetGenerateVideoPreviewSheetsQueueAll; data?: IBaseJob }
 
   // User
   | { name: JobName.UserDeleteCheck; data?: IBaseJob }

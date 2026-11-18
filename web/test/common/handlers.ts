@@ -207,6 +207,7 @@ export const createHandlers = (data: MockData): Handlers => {
 
     playAssetVideo: () => ({ body: minimalMp4, contentType: 'video/mp4' }),
     getAssetVideoPreview: ({ params }) => media(params.id),
+    getAssetVideoPreviewSheet: () => ({ status: 204 }),
     viewAsset: ({ params }) => media(params.id),
     downloadAsset: ({ params }) => media(params.id),
   };

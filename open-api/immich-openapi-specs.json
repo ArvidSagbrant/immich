@@ -5352,6 +5352,78 @@
         "x-immich-permission": "asset.view"
       }
     },
+    "/assets/{id}/video/preview-sheet": {
+      "get": {
+        "description": "Returns a JPEG grid of timeline previews with the cell layout in X-Immich-Preview-Layout.",
+        "operationId": "getAssetVideoPreviewSheet",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "slug",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": ""
+          },
+          "204": {
+            "description": "The preview sheet is not ready."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "cookie": []
+          },
+          {
+            "api_key": []
+          }
+        ],
+        "summary": "Get video preview sheet",
+        "tags": [
+          "Assets"
+        ],
+        "x-immich-history": [
+          {
+            "version": "v3",
+            "state": "Added"
+          }
+        ],
+        "x-immich-permission": "asset.view"
+      }
+    },
     "/assets/{id}/video/stream/main.m3u8": {
       "get": {
         "description": "Returns an HLS main playlist with all available variants for the asset.",
@@ -21341,7 +21413,8 @@
           "preview",
           "thumbnail",
           "sidecar",
-          "encoded_video"
+          "encoded_video",
+          "video_preview_sheet"
         ],
         "type": "string"
       },
@@ -23397,6 +23470,8 @@
           "AssetFileMigration",
           "AssetGenerateThumbnailsQueueAll",
           "AssetGenerateThumbnails",
+          "AssetGenerateVideoPreviewSheet",
+          "AssetGenerateVideoPreviewSheetsQueueAll",
           "AuditTableCleanup",
           "AuthChallengeCleanup",
           "DatabaseBackup",
@@ -23796,6 +23871,7 @@
           "memory-cleanup",
           "memory-create",
           "backup-database",
+          "video-preview-sheets",
           "integrity-missing-files",
           "integrity-untracked-files",
           "integrity-checksum-mismatch",

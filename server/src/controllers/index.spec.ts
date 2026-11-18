@@ -54,6 +54,7 @@ const SHARED_LINK_ROUTES = new Set([
   'GET assets/:id/thumbnail',
   'GET assets/:id/video/playback',
   'GET assets/:id/video/preview',
+  'GET assets/:id/video/preview-sheet',
   'GET assets/:id/video/stream/:sessionId/:variantIndex/:filename',
   'GET assets/:id/video/stream/:sessionId/:variantIndex/playlist.m3u8',
   'GET assets/:id/video/stream/main.m3u8',
